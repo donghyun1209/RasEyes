@@ -1,0 +1,43 @@
+"""비프음 주기 제어 모듈."""
+import time
+
+import config
+from fusion.engine import RiskLevel
+
+
+class BeepController:
+    """위험 수준에 따라 비프음 출력 가능 여부를 제어한다.
+
+    High Risk → 200ms 주기, Mid Risk → 500ms 주기로 경보가 과포화되지 않도록
+    쿨다운을 적용한다. NONE 상태에서는 쿨다운을 초기화하여 다음 위험 감지 시
+    즉각 경보가 울리도록 한다.
+    """
+
+    def __init__(self) -> None:
+        self._last_alert_time: float = 0.0
+
+    def should_beep(self, risk_level: RiskLevel) -> bool:
+        """현재 시각 기준으로 비프음을 출력해야 하는지 판단한다.
+
+        쿨다운이 만료됐을 때만 True를 반환하며, 반환과 동시에 타이머를 갱신한다.
+
+        Args:
+            risk_level: 퓨전 엔진이 판단한 현재 위험 수준.
+
+        Returns:
+            비프음을 출력해야 하면 True, 아직 쿨다운 중이면 False.
+        """
+        if risk_level == RiskLevel.NONE:
+            self._last_alert_time = 0.0
+            return False
+
+        interval_ms = (
+            config.AUDIO_HIGH_RISK_INTERVAL_MS
+            if risk_level == RiskLevel.HIGH
+            else config.AUDIO_MID_RISK_INTERVAL_MS
+        )
+        now = time.monotonic()
+        if now - self._last_alert_time >= interval_ms / 1000.0:
+            self._last_alert_time = now
+            return True
+        return False

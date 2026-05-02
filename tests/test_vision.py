@@ -1,9 +1,10 @@
-"""MockVision 기본 동작 테스트."""
-import numpy as np
+"""MockVision 및 MockCamera 동작 테스트."""
 import pytest
+import numpy as np
 
 from vision.interface import DetectionResult
 from vision.mock import MockVision
+from vision.mock_camera import MockCamera
 
 
 def test_mock_returns_injected_detections() -> None:
@@ -41,3 +42,53 @@ def test_mock_set_detections_updates_results() -> None:
     assert results == new_dets
 
     vision.stop()
+
+
+class TestMockCamera:
+    def test_blank_frame_shape(self) -> None:
+        """source=None이면 config 기본 해상도의 검은 프레임을 반환한다."""
+        cam = MockCamera()
+        cam.start()
+        frame = cam.read_frame()
+        assert frame.shape == (480, 640, 3)
+        assert frame.dtype == np.uint8
+        assert frame.sum() == 0
+        cam.stop()
+
+    def test_custom_resolution(self) -> None:
+        """width/height 파라미터가 빈 프레임 크기에 적용된다."""
+        cam = MockCamera(width=320, height=240)
+        cam.start()
+        frame = cam.read_frame()
+        assert frame.shape == (240, 320, 3)
+        cam.stop()
+
+    def test_raises_when_not_started(self) -> None:
+        """start() 호출 전 read_frame 시 RuntimeError를 발생시킨다."""
+        cam = MockCamera()
+        with pytest.raises(RuntimeError):
+            cam.read_frame()
+
+    def test_blank_frame_cycles(self) -> None:
+        """단일 프레임을 반복 반환한다 (인덱스 순환)."""
+        cam = MockCamera()
+        cam.start()
+        assert cam.frame_count == 1
+        f1 = cam.read_frame()
+        f2 = cam.read_frame()
+        assert f1.shape == f2.shape
+        cam.stop()
+
+    def test_stop_resets_state(self) -> None:
+        """stop() 후 read_frame 호출 시 RuntimeError를 발생시킨다."""
+        cam = MockCamera()
+        cam.start()
+        cam.stop()
+        with pytest.raises(RuntimeError):
+            cam.read_frame()
+
+    def test_file_not_found_raises(self) -> None:
+        """존재하지 않는 이미지 경로 지정 시 FileNotFoundError를 발생시킨다."""
+        cam = MockCamera(source="/nonexistent/image.jpg")
+        with pytest.raises((FileNotFoundError, ImportError)):
+            cam.start()

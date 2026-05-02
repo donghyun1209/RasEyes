@@ -1,10 +1,10 @@
 """센서 퓨전 엔진."""
-from collections import deque
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import List
 
 import config
+from sensor.filters import MovingAverageFilter
 from vision.interface import DetectionResult
 
 
@@ -38,11 +38,11 @@ class FusionEngine:
     - High Risk: 객체 탐지 & 거리 <= HIGH_RISK_DIST_CM & confidence >= MIN_CONFIDENCE
     - Mid Risk: 객체 탐지 & 거리 <= MID_RISK_DIST_CM
     - Low-light Fallback: confidence < MIN_CONFIDENCE → ToF 단독 모드
-    - ToF 값에 이동평균 필터(window=MOVING_AVG_WINDOW) 적용
+    - ToF 값에 MovingAverageFilter(window=MOVING_AVG_WINDOW) 적용
     """
 
     def __init__(self) -> None:
-        self._tof_window: deque[float] = deque(maxlen=config.MOVING_AVG_WINDOW)
+        self._filter = MovingAverageFilter()
 
     def evaluate(
         self,
@@ -58,8 +58,7 @@ class FusionEngine:
         Returns:
             FusionResult 인스턴스.
         """
-        self._tof_window.append(raw_distance_cm)
-        filtered_dist = sum(self._tof_window) / len(self._tof_window)
+        filtered_dist = self._filter.update(raw_distance_cm)
 
         max_conf = max((d.confidence for d in detections), default=0.0)
         tof_only = max_conf < config.MIN_CONFIDENCE

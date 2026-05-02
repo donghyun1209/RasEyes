@@ -1,13 +1,13 @@
 """오디오 출력 모듈 PC 모킹 구현체."""
 import logging
 
-from audio.interface import AudioInterface
+from audio.hal import BaseAudioHAL
 from fusion.engine import RiskLevel
 
 logger = logging.getLogger(__name__)
 
 
-class MockAudio(AudioInterface):
+class MockAudio(BaseAudioHAL):
     """테스트용 Mock 오디오 모듈.
 
     실제 블루투스 이어폰/부저 없이 로그만 출력하므로 PC 환경에서 테스트 가능.

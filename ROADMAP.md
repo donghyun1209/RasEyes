@@ -17,37 +17,41 @@
 
 ---
 
-## Phase 1 · PC 모킹(Mock) 레이어 구현
+## Phase 1 · PC 모킹(Mock) 레이어 구현 ✅
 > 목표: RPi 하드웨어 없이 전체 파이프라인을 PC에서 검증 가능하게 만들기
 
-### 1-A. HAL(Hardware Abstraction Layer) 인터페이스 정의
-| # | 작업 | 파일 |
-|---|------|------|
-| 1-A-1 | `BaseCameraHAL` 추상 클래스 정의 (프레임 캡처 인터페이스) | `vision/hal.py` |
-| 1-A-2 | `BaseToFHAL` 추상 클래스 정의 (거리 읽기 인터페이스) | `sensor/hal.py` |
-| 1-A-3 | `BaseAudioHAL` 추상 클래스 정의 (비프음 재생 인터페이스) | `audio/hal.py` |
+### 1-A. HAL(Hardware Abstraction Layer) 인터페이스 정의 ✅
+| # | 작업 | 파일 | 상태 |
+|---|------|------|------|
+| 1-A-1 | `BaseCameraHAL` 추상 클래스 정의 (프레임 캡처 인터페이스) | `vision/hal.py` | ✅ |
+| 1-A-2 | `BaseToFHAL` 추상 클래스 정의 (거리 읽기 인터페이스) | `sensor/hal.py` | ✅ |
+| 1-A-3 | `BaseAudioHAL` 추상 클래스 정의 (비프음 재생 인터페이스) | `audio/hal.py` | ✅ |
 
-### 1-B. Mock 구현체 작성
-| # | 작업 | 파일 |
-|---|------|------|
-| 1-B-1 | `MockCamera` — 로컬 이미지/영상 파일을 프레임으로 반환 | `vision/mock_camera.py` |
-| 1-B-2 | `MockToFSensor` — 시나리오별 거리값 시퀀스 생성 | `sensor/mock_tof.py` |
-| 1-B-3 | `MockAudioPlayer` — 콘솔 로그로 피드백 시뮬레이션 | `audio/mock_audio.py` |
+> **참고:** 기존 `sensor/interface.py`, `audio/interface.py`는 후방 호환 re-export로 유지.
 
-### 1-C. 센서 퓨전 엔진 구현 (핵심 로직)
-| # | 작업 | 파일 |
-|---|------|------|
-| 1-C-1 | ToF 이동 평균 필터 구현 (window=3) | `sensor/filters.py` |
-| 1-C-2 | 퓨전 규칙 구현 — High Risk / Mid Risk / Low-light Fallback | `fusion/engine.py` |
-| 1-C-3 | 거리에 따른 비프음 주기 가변 제어 로직 | `audio/beep_controller.py` |
+### 1-B. Mock 구현체 작성 ✅
+| # | 작업 | 파일 | 상태 |
+|---|------|------|------|
+| 1-B-1 | `MockCamera` — 빈 프레임 / 로컬 이미지 파일을 순환 반환 | `vision/mock_camera.py` | ✅ |
+| 1-B-2 | `MockToFSensor` — 고정값 또는 시나리오별 거리 시퀀스 생성 | `sensor/mock.py` | ✅ |
+| 1-B-3 | `MockAudio` — 콘솔 로그로 경보 피드백 시뮬레이션 | `audio/mock.py` | ✅ |
 
-### 1-D. 메인 오케스트레이터
-| # | 작업 | 파일 |
-|---|------|------|
-| 1-D-1 | `main.py` — 병렬 비전·센서 스레드 루프 구성 | `main.py` |
-| 1-D-2 | CSV 로거 구현 (1초 1회 기록) | `logs/logger.py` |
+### 1-C. 센서 퓨전 엔진 구현 (핵심 로직) ✅
+| # | 작업 | 파일 | 상태 |
+|---|------|------|------|
+| 1-C-1 | ToF 이동 평균 필터 구현 (window=3) | `sensor/filters.py` | ✅ |
+| 1-C-2 | 퓨전 규칙 구현 — High Risk / Mid Risk / Low-light Fallback | `fusion/engine.py` | ✅ |
+| 1-C-3 | 거리에 따른 비프음 주기 가변 제어 로직 | `audio/beep_controller.py` | ✅ |
 
-**Phase 1 완료 기준:** Mock 환경에서 E2E 파이프라인이 콘솔로 정상 동작하고, 시나리오별 경고 로직이 의도대로 트리거됨.
+### 1-D. 메인 오케스트레이터 ✅
+| # | 작업 | 파일 | 상태 |
+|---|------|------|------|
+| 1-D-1 | `main.py` — 병렬 비전·센서 스레드 루프 구성 | `main.py` | ✅ |
+| 1-D-2 | CSV 로거 구현 (1초 1회 기록) | `logs/logger.py` | ✅ |
+
+> **참고:** `CsvLogger` 클래스로 추출. `main.py`의 인라인 CSV 코드 제거. 비전·센서 각각 daemon thread로 분리, `queue.Queue(maxsize=2)` 를 통해 최신 값만 메인 루프에 전달.
+
+**Phase 1 완료 기준:** Mock 환경에서 E2E 파이프라인이 콘솔로 정상 동작하고, 시나리오별 경고 로직이 의도대로 트리거됨. ✅ **달성** (pytest 46개 전체 통과)
 
 ---
 
@@ -144,7 +148,7 @@
 
 ```
 Phase 0  ──✅── 기반 구축
-Phase 1  ──🔲── PC Mock 파이프라인 완성
+Phase 1  ──✅── PC Mock 파이프라인 완성
 Phase 2  ──🔲── MPS 비전 AI 통합
 Phase 3  ──🔲── pytest 테스트 스위트
 Phase 4  ──🔲── RPi 5 하드웨어 이식

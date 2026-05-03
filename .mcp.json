@@ -18,7 +18,7 @@
     },
     "shell": {
       "command": "uvx",
-      "args": ["mcp-server-shell"]
+      "args": ["mcp-shell-server"]
     }
   }
 }

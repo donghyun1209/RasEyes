@@ -7,6 +7,18 @@
     "sequential-thinking": {
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"]
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/Users/hwangdonghyun/Workspace_2/Projects/RasEyes"
+      ]
+    },
+    "shell": {
+      "command": "uvx",
+      "args": ["mcp-server-shell"]
     }
   }
 }

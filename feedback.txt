@@ -1,0 +1,29 @@
+### Phase 1 구현 리뷰 및 피드백 (2차 정밀 검토 반영)
+
+Phase 1(PC 모킹 레이어 구현)의 완성도를 재검토한 결과, `GEMINI.md`와 `TRD.md`에 명시된 핵심 원칙들이 잘 반영되어 있습니다. 특히 하드웨어 추상화(HAL)와 병렬 처리를 통한 저지연 설계가 인상적입니다.
+
+#### ✅ 긍정적인 부분
+1. **HAL 설계의 적절성**: `BaseCameraHAL`, `BaseToFHAL`, `BaseAudioHAL` 등 인터페이스가 명확하게 정의되어 있어, Phase 4의 실제 RPi 하드웨어 이식이 매우 수월할 것으로 보입니다.
+2. **비차단 병렬 처리**: `main.py`에서 `queue.Queue(maxsize=2)`와 `_put_latest` 패턴을 사용하여 최신 데이터만 유지하고 병목을 방지한 점은 엣지 디바이스의 성능 제약을 잘 고려한 설계입니다.
+3. **로직의 응집도**: `FusionEngine`과 `BeepController`가 I/O와 분리되어 독립적으로 테스트 가능한 구조이며, `GEMINI.md` Rule 3(Fallback 로직)이 충실히 구현되었습니다.
+4. **Mock의 유연성**: `MockToFSensor`의 시퀀스 기능이나 `MockCamera`의 이미지 소스 지원 등을 통해 다양한 시나리오 검증이 가능합니다.
+
+#### 💡 개선 및 고려 사항 (심층 피드백)
+1. **타입 힌트의 범용성 (추상화 강화)**: 
+   - `main.py`의 `_vision_worker` 및 `_sensor_worker` 함수에서 인자 타입을 `MockVision`, `MockToFSensor`와 같은 구체 클래스로 지정하고 있습니다. 이를 `VisionInterface`, `BaseToFHAL`과 같은 인터페이스 타입으로 변경하면 메인 오케스트레이터가 구현체에 관계없이 동작하는 구조를 더 명확히 할 수 있습니다.
+
+2. **실측 FPS 모니터링 및 미사용 상수 활용**: 
+   - `config.py`에 `FPS_FALLBACK_THRESHOLD`, `DATA_STALENESS_THRESHOLD_SEC` 등 중요한 성능 임계값들이 이미 정의되어 있으나, 아직 `main.py` 루프에서 실제 활용되지 않고 있습니다.
+   - 현재 `CsvLogger`는 `config.TARGET_FPS`를 고정 기록하고 있는데, 메인 루프에서 실제 경과 시간을 계산하여 **실측 FPS**를 기록하고, 기준 미달 시 `FPS_FALLBACK_THRESHOLD`를 기반으로 Fallback을 트리거하는 로직이 추가되어야 합니다.
+
+3. **Mock 구현체의 정밀도 향상**:
+   - `MockVision.get_frame_detections`에서 프레임 생성 시 `(480, 640, 3)`을 하드코딩하고 있습니다. 이를 `config.FRAME_HEIGHT`, `config.FRAME_WIDTH` 상수를 참조하도록 수정하면 설정 변경 시 일관성을 유지할 수 있습니다.
+
+4. **워커 스레드 예외 처리 및 복구 메커니즘**:
+   - `GEMINI.md` Rule 7(하드웨어 실패 시 재초기화)을 위해, 워커 스레드 내에서 하드웨어 접근 오류 발생 시 단순히 로그만 남기는 대신 `start()`를 재호출하여 복구를 시도하는 로직이 향후 Phase 4에서 필요합니다.
+   - 또한 `stop_event` 시그널링 외에도, 하드웨어 인터페이스가 블로킹 상태에 빠질 경우를 대비한 타임아웃 처리가 필요할 수 있습니다.
+
+5. **테스트 시나리오 확장 제안**:
+   - 현재 `test_fusion.py`는 경계값 위주로 잘 구성되어 있습니다. 추가적으로 **ToF 데이터의 급격한 지터(Jitter)** 상황에서 `MovingAverageFilter`가 위험 수준 판단을 얼마나 안정적으로 유지하는지에 대한 시계열 테스트 케이스가 추가되면 더 견고해질 것입니다.
+
+전반적으로 Phase 1의 목표인 "RPi 하드웨어 없이 전체 파이프라인 검증"을 훌륭하게 달성하였으며, 위 사항들을 Phase 2~4 진행 과정에서 점진적으로 반영한다면 매우 높은 수준의 안정성을 확보할 수 있을 것입니다.

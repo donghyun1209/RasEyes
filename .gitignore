@@ -52,3 +52,5 @@ coverage.xml
 
 # Jupyter
 .ipynb_checkpoints/
+
+.mcp.json

@@ -41,6 +41,21 @@ class VisionInterface(ABC):
         """
         ...
 
+    @property
+    @abstractmethod
+    def conf_threshold(self) -> float:
+        """현재 적용 중인 신뢰도 임계값을 반환한다."""
+        ...
+
+    @abstractmethod
+    def set_conf_threshold(self, value: float) -> None:
+        """신뢰도 임계값을 설정한다.
+
+        Args:
+            value: 새 신뢰도 하한 (0.0 ~ 1.0).
+        """
+        ...
+
     @abstractmethod
     def stop(self) -> None:
         """카메라 및 모델 리소스를 해제한다."""

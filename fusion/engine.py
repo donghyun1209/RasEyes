@@ -1,7 +1,7 @@
 """센서 퓨전 엔진."""
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import List
+from typing import List, Optional
 
 import config
 from sensor.filters import MovingAverageFilter
@@ -48,32 +48,40 @@ class FusionEngine:
         self,
         detections: List[DetectionResult],
         raw_distance_cm: float,
+        min_confidence: Optional[float] = None,
     ) -> FusionResult:
         """탐지 결과와 ToF 거리로 위험 수준을 평가한다.
 
         Args:
             detections: 비전 모듈의 탐지 결과 목록.
             raw_distance_cm: ToF 센서 원시 거리값 (cm).
+            min_confidence: 유효 탐지로 인정할 신뢰도 하한. None이면 config.MIN_CONFIDENCE 사용.
+                YoloDetector의 conf_threshold가 변경된 경우 일치시켜 전달해야 한다.
 
         Returns:
             FusionResult 인스턴스.
         """
+        effective_min_conf = min_confidence if min_confidence is not None else config.MIN_CONFIDENCE
         filtered_dist = self._filter.update(raw_distance_cm)
 
         max_conf = max((d.confidence for d in detections), default=0.0)
-        tof_only = max_conf < config.MIN_CONFIDENCE
+        tof_only = max_conf < effective_min_conf
 
         if tof_only:
             risk = self._tof_only_risk(filtered_dist)
             return FusionResult(risk, filtered_dist, tof_only_mode=True)
 
         if detections:
-            if filtered_dist <= config.HIGH_RISK_DIST_CM and max_conf >= config.MIN_CONFIDENCE:
+            if filtered_dist <= config.HIGH_RISK_DIST_CM and max_conf >= effective_min_conf:
                 return FusionResult(RiskLevel.HIGH, filtered_dist, tof_only_mode=False)
             if filtered_dist <= config.MID_RISK_DIST_CM:
                 return FusionResult(RiskLevel.MID, filtered_dist, tof_only_mode=False)
 
         return FusionResult(RiskLevel.NONE, filtered_dist, tof_only_mode=False)
+
+    def reset_filter(self) -> None:
+        """이동 평균 필터 버퍼를 초기화한다."""
+        self._filter.reset()
 
     def _tof_only_risk(self, distance_cm: float) -> RiskLevel:
         """ToF 단독 모드에서 거리 기반 위험 수준을 반환한다."""

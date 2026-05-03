@@ -2,6 +2,7 @@
 import pytest
 import numpy as np
 
+import config
 from vision.interface import DetectionResult
 from vision.mock import MockVision
 from vision.mock_camera import MockCamera
@@ -16,7 +17,7 @@ def test_mock_returns_injected_detections() -> None:
     frame, results = vision.get_frame_detections()
 
     assert isinstance(frame, np.ndarray)
-    assert frame.shape == (480, 640, 3)
+    assert frame.shape == (config.FRAME_HEIGHT, config.FRAME_WIDTH, 3)
     assert results == dets
     vision.stop()
 
@@ -50,7 +51,7 @@ class TestMockCamera:
         cam = MockCamera()
         cam.start()
         frame = cam.read_frame()
-        assert frame.shape == (480, 640, 3)
+        assert frame.shape == (config.FRAME_HEIGHT, config.FRAME_WIDTH, 3)
         assert frame.dtype == np.uint8
         assert frame.sum() == 0
         cam.stop()

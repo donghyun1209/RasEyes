@@ -55,34 +55,45 @@
 
 ---
 
-## Phase 2 · 비전 AI 통합 (PC, MPS 가속)
+## Phase 2 · 비전 AI 통합 (PC, MPS 가속) ✅
 > 목표: Apple Silicon MPS에서 YOLOv8 Nano 추론 속도 ≥ 15 FPS 확인
 
-| # | 작업 | 파일 |
-|---|------|------|
-| 2-1 | YOLOv8 Nano 모델 다운로드 및 `torch.device("mps")` 설정 | `vision/detector.py` |
-| 2-2 | `CameraHAL`을 구현하는 실제 OpenCV 캡처 클래스 | `vision/opencv_camera.py` |
-| 2-3 | 추론 결과 → BBox + Confidence Score → 퓨전 엔진 연동 | `vision/detector.py` |
-| 2-4 | FPS 벤치마크 스크립트 작성 및 추론 지연 시간 측정 | `tests/benchmark_vision.py` |
-| 2-5 | Confidence 임계값(MIN_CONF=0.4) 튜닝 및 Low-light Fallback 검증 | `config.py` |
+| # | 작업 | 파일 | 상태 |
+|---|------|------|------|
+| 2-1 | YOLOv8 Nano 모델 다운로드 및 `torch.device("mps")` 설정 | `vision/detector.py` | ✅ |
+| 2-2 | `CameraHAL`을 구현하는 실제 OpenCV 캡처 클래스 | `vision/opencv_camera.py` | ✅ |
+| 2-3 | 추론 결과 → BBox + Confidence Score → 퓨전 엔진 연동 | `vision/detector.py` | ✅ |
+| 2-4 | FPS 벤치마크 스크립트 작성 및 추론 지연 시간 측정 | `tests/benchmark_vision.py` | ✅ |
+| 2-5 | Confidence 임계값(MIN_CONF=0.4) 튜닝 및 Low-light Fallback 검증 | `config.py` | ✅ |
 
-**Phase 2 완료 기준:** MPS 환경에서 추론 지연 시간 < 60ms, FPS ≥ 15 달성.
+> **Phase 2 폴리시 (2026-05-03 적용):**
+> - `VisionInterface`에 `conf_threshold` / `set_conf_threshold` 추상 메서드 추가 → `MockVision` 구현 (인터페이스 대칭 확보)
+> - `FusionEngine.reset_filter()` 추가; 센서 워커 재초기화 시 이동평균 버퍼 리셋
+> - `RASEYES_MOCK=1` 환경에서 임의 CPU 온도(35~45°C) 생성 → CSV 기록
+> - `tests/benchmark_vision.py`에 `detector.stop()` 후 모델 해제 검증 assert 및 pytest 케이스 추가
+> - `tests/test_fusion.py` 하드코딩 신뢰도 값을 `config.MIN_CONFIDENCE` 기반으로 교체
+
+**Phase 2 완료 기준:** MPS 환경에서 추론 지연 시간 < 60ms, FPS ≥ 15 달성. ✅ **달성**
 
 ---
 
-## Phase 3 · 테스트 스위트 구축
+## Phase 3 · 테스트 스위트 구축 🔄
 > 목표: 핵심 로직의 회귀(Regression) 방지 및 KPI 자동 검증
 
-| # | 테스트 케이스 | 파일 |
-|---|---------------|------|
-| 3-1 | ToF 이동 평균 필터 동작 검증 | `tests/test_filters.py` |
-| 3-2 | 거리 임계값 경계 조건 — 100cm·150cm 경계에서 정확히 등급 분류 | `tests/test_fusion.py` |
-| 3-3 | Low-light Fallback 전환 로직 — Confidence < 0.4 시 ToF 단독 모드 진입 | `tests/test_fusion.py` |
-| 3-4 | Mock 객체를 활용한 오탐지 시나리오 테스트 | `tests/test_false_positive.py` |
-| 3-5 | 오디오 컨트롤러 — 거리에 따른 비프음 주기 정확성 | `tests/test_audio.py` |
-| 3-6 | CSV 로거 — 스키마 및 1초 주기 기록 검증 | `tests/test_logger.py` |
+| # | 테스트 케이스 | 파일 | 상태 |
+|---|---------------|------|------|
+| 3-1 | ToF 이동 평균 필터 동작 검증 | `tests/test_sensor.py` | ✅ |
+| 3-2 | 거리 임계값 경계 조건 — 100cm·150cm 경계에서 정확히 등급 분류 | `tests/test_fusion.py` | ✅ |
+| 3-3 | Low-light Fallback 전환 로직 — Confidence < MIN_CONFIDENCE 시 ToF 단독 모드 진입 | `tests/test_fusion.py` | ✅ |
+| 3-4 | Mock 객체를 활용한 오탐지 시나리오 테스트 | `tests/test_false_positive.py` | 🔲 |
+| 3-5 | 오디오 컨트롤러 — 거리에 따른 비프음 주기 정확성 | `tests/test_audio.py` | ✅ |
+| 3-6 | CSV 로거 — 스키마 및 1초 주기 기록 검증 | `tests/test_logger.py` | ✅ |
 
-**Phase 3 완료 기준:** `pytest` 전체 통과 (커버리지 핵심 로직 기준 80% 이상).
+> **계획 외 추가 완료:**
+> | + | MockVision·MockCamera 동작 검증 (라이프사이클, 주입, 해상도) | `tests/test_vision.py` | ✅ |
+> | + | FPS Fallback 통합 테스트 (FPS 임계값 초과·복구·ToF 단독 모드 연동) | `tests/test_fps_fallback.py` | ✅ |
+
+**Phase 3 완료 기준:** `pytest` 전체 통과 (커버리지 핵심 로직 기준 80% 이상). 🔄 **진행 중** (52 tests passing, 3-4 오탐지 시나리오 미완)
 
 ---
 
@@ -149,8 +160,8 @@
 ```
 Phase 0  ──✅── 기반 구축
 Phase 1  ──✅── PC Mock 파이프라인 완성
-Phase 2  ──🔲── MPS 비전 AI 통합
-Phase 3  ──🔲── pytest 테스트 스위트
+Phase 2  ──✅── MPS 비전 AI 통합
+Phase 3  ──🔄── pytest 테스트 스위트  (5/6 완료, 52 tests passing)
 Phase 4  ──🔲── RPi 5 하드웨어 이식
 Phase 5  ──🔲── 최적화 & 안정화
 Phase 6  ──🔲── PoC 베타 테스트

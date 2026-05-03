@@ -24,3 +24,13 @@ AUDIO_MID_RISK_INTERVAL_MS: int = 500
 # Performance Monitoring
 DATA_STALENESS_THRESHOLD_SEC: float = 0.5
 FPS_FALLBACK_THRESHOLD: int = 10
+
+# Vision Model
+YOLO_MODEL_PATH: str = "yolov8n.pt"
+
+# Benchmark
+BENCHMARK_WARMUP_FRAMES: int = 5
+
+# Worker Thread Recovery
+REINIT_MAX_RETRIES: int = 5
+REINIT_DELAY_SEC: float = 1.0

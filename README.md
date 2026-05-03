@@ -40,21 +40,35 @@ ToF    ──► Distance Filter (이동평균)    ──┘         │
 
 ```
 RasEyes/
-├── main.py            # 오케스트레이션 (파이프라인 연결만 담당)
-├── config.py          # 전역 상수 및 임계값
+├── main.py                   # 오케스트레이션 (파이프라인 연결·스레드 조정)
+├── config.py                 # 전역 상수 및 임계값
 ├── vision/
-│   ├── interface.py   # VisionInterface HAL 추상 클래스
-│   └── mock.py        # PC 테스트용 Mock 구현체
+│   ├── interface.py          # VisionInterface HAL 추상 클래스
+│   ├── hal.py                # BaseCameraHAL 추상 클래스
+│   ├── detector.py           # YoloDetector (YOLOv8 Nano + MPS)
+│   ├── opencv_camera.py      # OpenCVCamera — 실제 웹캠 HAL 구현체
+│   ├── mock.py               # MockVision — PC 테스트용 Mock 구현체
+│   └── mock_camera.py        # MockCamera — 빈 프레임 / 이미지 순환
 ├── sensor/
-│   ├── interface.py   # ToFSensorInterface HAL 추상 클래스
-│   └── mock.py        # PC 테스트용 Mock 구현체
+│   ├── hal.py                # BaseToFHAL 추상 클래스
+│   ├── filters.py            # MovingAverageFilter (window=3)
+│   └── mock.py               # MockToFSensor — 고정값·시퀀스 지원
 ├── fusion/
-│   └── engine.py      # 센서 퓨전 엔진 (핵심 비즈니스 로직)
+│   └── engine.py             # FusionEngine (퓨전 로직 + reset_filter)
 ├── audio/
-│   ├── interface.py   # AudioInterface HAL 추상 클래스
-│   └── mock.py        # PC 테스트용 Mock 구현체
-├── logs/              # CSV 로그 저장 디렉터리
-└── tests/             # pytest 테스트 스위트
+│   ├── hal.py                # BaseAudioHAL 추상 클래스
+│   ├── beep_controller.py    # BeepController — 쿨다운 기반 경보 제어
+│   └── mock.py               # MockAudio — 콘솔 경보 시뮬레이션
+├── logs/
+│   └── logger.py             # CsvLogger — 1초 1회 CSV 기록
+└── tests/
+    ├── test_fusion.py        # 거리 경계·Fallback·신뢰도 케이스
+    ├── test_sensor.py        # 이동평균 필터·MockToFSensor
+    ├── test_audio.py         # BeepController·MockAudio
+    ├── test_logger.py        # CsvLogger 스키마·기록 검증
+    ├── test_vision.py        # MockVision·MockCamera 동작 검증
+    ├── test_fps_fallback.py  # FPS Fallback 통합 테스트
+    └── benchmark_vision.py   # YoloDetector KPI 벤치마크
 ```
 
 HAL(Hardware Abstraction Layer) 인터페이스를 통해 현재 PC Mock 구현체와 추후 RPi 하드웨어 구현체를 코드 변경 없이 교체할 수 있습니다.
@@ -94,14 +108,17 @@ python main.py
 ## 테스트
 
 ```bash
-# 전체 테스트 실행
+# 전체 테스트 실행 (현재 52개 통과)
 pytest
 
 # 커버리지 포함
 pytest --cov=. --cov-report=term-missing
+
+# YoloDetector KPI 벤치마크 (ultralytics 필요)
+python -m tests.benchmark_vision --frames 100
 ```
 
-핵심 테스트 케이스: 거리 임계값 경계 조건, Low-light Fallback 전환, 오탐지 시나리오
+핵심 테스트 케이스: 거리 임계값 경계 조건, Low-light Fallback 전환, FPS Fallback 통합, 이동평균 필터 노이즈 평활화
 
 ---
 
@@ -125,9 +142,9 @@ pytest --cov=. --cov-report=term-missing
 | Phase | 내용 | 상태 |
 |-------|------|------|
 | 0 | 프로젝트 기반 구축 | ✅ 완료 |
-| 1 | PC Mock 파이프라인 완성 | 🔲 진행 중 |
-| 2 | YOLOv8 + MPS 비전 AI 통합 | 🔲 예정 |
-| 3 | pytest 테스트 스위트 구축 | 🔲 예정 |
+| 1 | PC Mock 파이프라인 완성 | ✅ 완료 |
+| 2 | YOLOv8 + MPS 비전 AI 통합 | ✅ 완료 |
+| 3 | pytest 테스트 스위트 구축 | 🔄 진행 중 (5/6) |
 | 4 | RPi 5 하드웨어 이식 | 🔲 예정 |
 | 5 | 시스템 최적화 및 안정화 | 🔲 예정 |
 | 6 | PoC 베타 테스트 | 🔲 예정 |

@@ -44,16 +44,16 @@ class CsvLogger:
         *,
         tof_distance_cm: float,
         alert_triggered: bool,
+        fps: int,
         cpu_temp: float = 0.0,
-        fps: int = config.TARGET_FPS,
     ) -> None:
         """현재 상태를 1행 기록한다.
 
         Args:
             tof_distance_cm: 이동평균 필터 적용 후 ToF 거리 (cm).
             alert_triggered: 이번 프레임에서 경보가 발생했는지 여부.
+            fps: 현재 실측 FPS. 반드시 명시적으로 전달해야 한다.
             cpu_temp: CPU 온도 (°C). RPi 이전 단계에서는 0.0.
-            fps: 현재 FPS. 기본값은 config.TARGET_FPS.
 
         Raises:
             RuntimeError: open() 호출 전인 경우.

@@ -25,7 +25,7 @@ class TestCsvLogger:
         path = str(tmp_path / "test.csv")
         log = CsvLogger(path=path)
         log.open()
-        log.write_row(tof_distance_cm=120.5, alert_triggered=True)
+        log.write_row(tof_distance_cm=120.5, alert_triggered=True, fps=15)
         log.close()
 
         with open(path, newline="", encoding="utf-8") as f:
@@ -39,8 +39,8 @@ class TestCsvLogger:
         path = str(tmp_path / "test.csv")
         log = CsvLogger(path=path)
         log.open()
-        log.write_row(tof_distance_cm=80.0, alert_triggered=True)
-        log.write_row(tof_distance_cm=160.0, alert_triggered=False)
+        log.write_row(tof_distance_cm=80.0, alert_triggered=True, fps=15)
+        log.write_row(tof_distance_cm=160.0, alert_triggered=False, fps=15)
         log.close()
 
         with open(path, newline="", encoding="utf-8") as f:
@@ -53,7 +53,7 @@ class TestCsvLogger:
         """open() 전 write_row 호출 시 RuntimeError를 발생시킨다."""
         log = CsvLogger(path=str(tmp_path / "test.csv"))
         with pytest.raises(RuntimeError):
-            log.write_row(tof_distance_cm=100.0, alert_triggered=False)
+            log.write_row(tof_distance_cm=100.0, alert_triggered=False, fps=15)
 
     def test_open_twice_raises(self, tmp_path) -> None:
         """이미 열린 로거에 open() 재호출 시 RuntimeError를 발생시킨다."""
@@ -72,12 +72,12 @@ class TestCsvLogger:
         log.close()
         assert Path(path).exists()
 
-    def test_cpu_temp_and_fps_defaults(self, tmp_path) -> None:
-        """cpu_temp=0.0, fps=TARGET_FPS가 기본값으로 기록된다."""
+    def test_cpu_temp_default_and_fps_explicit(self, tmp_path) -> None:
+        """cpu_temp=0.0 기본값 및 명시적 fps 값이 정확히 기록된다."""
         path = str(tmp_path / "test.csv")
         log = CsvLogger(path=path)
         log.open()
-        log.write_row(tof_distance_cm=200.0, alert_triggered=False)
+        log.write_row(tof_distance_cm=200.0, alert_triggered=False, fps=config.TARGET_FPS)
         log.close()
 
         with open(path, newline="", encoding="utf-8") as f:
@@ -90,7 +90,7 @@ class TestCsvLogger:
         path = str(tmp_path / "test.csv")
         log = CsvLogger(path=path)
         log.open()
-        log.write_row(tof_distance_cm=200.0, alert_triggered=False)
+        log.write_row(tof_distance_cm=200.0, alert_triggered=False, fps=15)
         log.close()
 
         with open(path, newline="", encoding="utf-8") as f:
@@ -102,7 +102,7 @@ class TestCsvLogger:
         path = str(tmp_path / "test.csv")
         log = CsvLogger(path=path)
         log.open()
-        log.write_row(tof_distance_cm=50.0, alert_triggered=True)
+        log.write_row(tof_distance_cm=50.0, alert_triggered=True, fps=12)
         log.close()
 
         with open(path, newline="", encoding="utf-8") as f:

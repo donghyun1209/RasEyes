@@ -3,12 +3,17 @@
 각 도메인 모듈을 조립하고 메인 루프를 구동한다.
 비즈니스 로직은 fusion.engine에, 로깅은 logs.logger에 위임하며
 이 파일은 파이프라인 연결과 스레드 조정만 담당한다.
+
+환경 변수:
+    RASEYES_MOCK=1: MockVision 사용 (카메라·모델 불필요, 기본값: 0).
 """
 import logging
+import os
 import queue
+import random
 import threading
 import time
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import config
 from audio.beep_controller import BeepController
@@ -17,8 +22,10 @@ from fusion.engine import FusionEngine, RiskLevel
 from logs.logger import CsvLogger
 from sensor.hal import BaseToFHAL
 from sensor.mock import MockToFSensor
+from vision.detector import YoloDetector
 from vision.interface import DetectionResult, VisionInterface
 from vision.mock import MockVision
+from vision.opencv_camera import OpenCVCamera
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -26,7 +33,6 @@ logger = logging.getLogger(__name__)
 # 각 큐는 최신 1개만 유지하면 충분하지만 burst 여유를 위해 2슬롯 확보
 _Q_SIZE = 2
 _FPS_EMA_ALPHA: float = 0.2   # 실측 FPS EMA 평활화 계수
-_REINIT_DELAY_SEC: float = 1.0  # 재초기화 실패 후 재시도 전 대기 시간
 
 
 def _put_latest(q: "queue.Queue", item: object) -> None:
@@ -47,43 +53,75 @@ def _vision_worker(
     out_q: "queue.Queue[Tuple[float, object, List[DetectionResult]]]",
 ) -> None:
     """비전 캡처+탐지를 별도 스레드에서 실행하고 결과를 큐에 넣는다."""
+    consecutive_failures = 0
     while not stop_event.is_set():
         try:
             frame, detections = vision.get_frame_detections()
             _put_latest(out_q, (time.monotonic(), frame, detections))
+            consecutive_failures = 0
         except Exception as exc:
-            logger.warning("Vision 워커 오류, 재초기화 시도: %s", exc)
+            consecutive_failures += 1
+            if consecutive_failures > config.REINIT_MAX_RETRIES:
+                logger.critical(
+                    "Vision 워커 최대 재시도(%d) 초과, 스레드 종료",
+                    config.REINIT_MAX_RETRIES,
+                )
+                break
+            logger.warning(
+                "Vision 워커 오류 (%d/%d), 재초기화 시도: %s",
+                consecutive_failures,
+                config.REINIT_MAX_RETRIES,
+                exc,
+            )
             try:
                 vision.start()
             except Exception as reinit_exc:
                 logger.error("Vision 재초기화 실패: %s", reinit_exc)
-                time.sleep(_REINIT_DELAY_SEC)
+                time.sleep(config.REINIT_DELAY_SEC)
 
 
 def _sensor_worker(
     sensor: BaseToFHAL,
     stop_event: threading.Event,
     out_q: "queue.Queue[Tuple[float, float]]",
+    on_reinit: Optional[Callable[[], None]] = None,
 ) -> None:
     """ToF 거리 읽기를 별도 스레드에서 실행하고 결과를 큐에 넣는다."""
     interval = 1.0 / config.TARGET_FPS
+    consecutive_failures = 0
     while not stop_event.is_set():
         try:
             distance = sensor.read_distance_cm()
             _put_latest(out_q, (time.monotonic(), distance))
+            consecutive_failures = 0
         except Exception as exc:
-            logger.warning("센서 워커 오류, 재초기화 시도: %s", exc)
+            consecutive_failures += 1
+            if consecutive_failures > config.REINIT_MAX_RETRIES:
+                logger.critical(
+                    "센서 워커 최대 재시도(%d) 초과, 스레드 종료",
+                    config.REINIT_MAX_RETRIES,
+                )
+                break
+            logger.warning(
+                "센서 워커 오류 (%d/%d), 재초기화 시도: %s",
+                consecutive_failures,
+                config.REINIT_MAX_RETRIES,
+                exc,
+            )
             try:
                 sensor.start()
+                if on_reinit is not None:
+                    on_reinit()
             except Exception as reinit_exc:
                 logger.error("센서 재초기화 실패: %s", reinit_exc)
-                time.sleep(_REINIT_DELAY_SEC)
+                time.sleep(config.REINIT_DELAY_SEC)
         time.sleep(interval)
 
 
 def main() -> None:
     """RasEyes 메인 루프 (병렬 비전·센서 스레드)."""
-    vision = MockVision()
+    _use_mock = os.getenv("RASEYES_MOCK", "0") == "1"
+    vision: VisionInterface = MockVision() if _use_mock else YoloDetector(camera=OpenCVCamera())
     sensor = MockToFSensor(distance_cm=200.0)
     fusion = FusionEngine()
     audio = MockAudio()
@@ -107,7 +145,7 @@ def main() -> None:
     )
     s_thread = threading.Thread(
         target=_sensor_worker,
-        args=(sensor, stop_event, sensor_q),
+        args=(sensor, stop_event, sensor_q, fusion.reset_filter),
         daemon=True,
         name="sensor-worker",
     )
@@ -122,15 +160,18 @@ def main() -> None:
     last_vision_ts: Optional[float] = None
     last_sensor_ts: Optional[float] = None
 
-    # 실측 FPS 상태
+    # 실측 FPS 상태 (메인 루프 + 비전 워커 별도 추적)
     actual_fps: float = float(config.TARGET_FPS)
+    vision_fps: float = float(config.TARGET_FPS)
     prev_loop_start: float = time.monotonic()
+    prev_vision_ts: Optional[float] = None
     fps_fallback_active: bool = False
 
     last_log_time = time.monotonic()
     frame_interval = 1.0 / config.TARGET_FPS
 
-    logger.info("RasEyes 시작 (Mock 모드, 병렬 스레드)")
+    mode = "Mock" if _use_mock else "YoloDetector"
+    logger.info("RasEyes 시작 (%s 모드, 병렬 스레드)", mode)
     try:
         while True:
             loop_start = time.monotonic()
@@ -141,9 +182,18 @@ def main() -> None:
                 actual_fps = (1 - _FPS_EMA_ALPHA) * actual_fps + _FPS_EMA_ALPHA * (1.0 / iter_time)
             prev_loop_start = loop_start
 
-            # 최신 값이 있으면 가져오고 없으면 이전 값 재사용
+            # 비전 큐: 남은 프레임 예산만큼 블로킹 대기 (데이터 즉시 처리 보장)
+            _vision_wait = max(0.0, frame_interval - (time.monotonic() - loop_start))
             try:
-                vision_ts, _, last_detections = vision_q.get_nowait()
+                vision_ts, _, last_detections = vision_q.get(timeout=_vision_wait)
+                if prev_vision_ts is not None:
+                    v_iter = vision_ts - prev_vision_ts
+                    if v_iter > 0:
+                        vision_fps = (
+                            (1 - _FPS_EMA_ALPHA) * vision_fps
+                            + _FPS_EMA_ALPHA / v_iter
+                        )
+                prev_vision_ts = vision_ts
                 last_vision_ts = vision_ts
             except queue.Empty:
                 pass
@@ -174,31 +224,43 @@ def main() -> None:
                 )
                 last_distance = float(config.MID_RISK_DIST_CM) + 1.0
 
-            # FPS 기준 미달 시 ToF 단독 모드 Fallback (상태 변화 시에만 로그)
-            if actual_fps < config.FPS_FALLBACK_THRESHOLD:
+            # FPS 기준 미달 시 ToF 단독 모드 Fallback (루프·비전 워커 중 낮은 쪽 기준)
+            effective_fps = min(actual_fps, vision_fps)
+            if effective_fps < config.FPS_FALLBACK_THRESHOLD:
                 if not fps_fallback_active:
                     logger.warning(
-                        "FPS 기준 미달 (%.1f FPS < %d), ToF 단독 모드 전환",
+                        "FPS 기준 미달 (루프 %.1f FPS, 비전 %.1f FPS < %d), ToF 단독 모드 전환",
                         actual_fps,
+                        vision_fps,
                         config.FPS_FALLBACK_THRESHOLD,
                     )
                     fps_fallback_active = True
                 last_detections = []
             elif fps_fallback_active:
-                logger.info("FPS 회복 (%.1f FPS), 정상 모드 복귀", actual_fps)
+                logger.info(
+                    "FPS 회복 (루프 %.1f FPS, 비전 %.1f FPS), 정상 모드 복귀",
+                    actual_fps,
+                    vision_fps,
+                )
                 fps_fallback_active = False
 
-            result = fusion.evaluate(last_detections, last_distance)
+            result = fusion.evaluate(
+                last_detections,
+                last_distance,
+                min_confidence=vision.conf_threshold,
+            )
 
             if beep.should_beep(result.risk_level):
                 audio.play_alert(result.risk_level)
 
             now = time.monotonic()
             if now - last_log_time >= config.LOG_INTERVAL_SEC:
+                cpu_temp = round(40.0 + random.uniform(-5.0, 5.0), 1) if _use_mock else 0.0
                 csv_logger.write_row(
                     tof_distance_cm=result.distance_cm,
                     alert_triggered=result.risk_level != RiskLevel.NONE,
                     fps=max(0, round(actual_fps)),
+                    cpu_temp=cpu_temp,
                 )
                 last_log_time = now
 

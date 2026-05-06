@@ -92,8 +92,9 @@
 > **계획 외 추가 완료:**
 > | + | MockVision·MockCamera 동작 검증 (라이프사이클, 주입, 해상도) | `tests/test_vision.py` | ✅ |
 > | + | FPS Fallback 통합 테스트 (FPS 임계값 초과·복구·ToF 단독 모드 연동) | `tests/test_fps_fallback.py` | ✅ |
+> | + | 장기 안정성 테스트 — Mock 모드 5초 연속 실행 시 메모리 누수 없음 검증 (tracemalloc, 4 MiB 기준) | `tests/test_longevity.py` | ✅ |
 
-**Phase 3 완료 기준:** `pytest` 전체 통과 (커버리지 핵심 로직 기준 80% 이상). ✅ **달성** (68 tests passing)
+**Phase 3 완료 기준:** `pytest` 전체 통과 (커버리지 핵심 로직 기준 80% 이상). ✅ **달성** (72 tests passing)
 
 ---
 
@@ -161,7 +162,7 @@
 Phase 0  ──✅── 기반 구축
 Phase 1  ──✅── PC Mock 파이프라인 완성
 Phase 2  ──✅── MPS 비전 AI 통합
-Phase 3  ──✅── pytest 테스트 스위트  (68 tests passing)
+Phase 3  ──✅── pytest 테스트 스위트  (72 tests passing)
 Phase 4  ──🔲── RPi 5 하드웨어 이식
 Phase 5  ──🔲── 최적화 & 안정화
 Phase 6  ──🔲── PoC 베타 테스트

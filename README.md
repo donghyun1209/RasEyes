@@ -21,9 +21,9 @@
 
 ```
 Camera ──► Vision Module (YOLOv8 Nano)  ──┐
-                                           ├──► Fusion Engine ──► Audio Feedback
-ToF    ──► Distance Filter (이동평균)    ──┘         │
-                                                     └──► CSV Logger
+                                            ├──► Fusion Engine ──► Audio Feedback
+ToF    ──► Distance Filter (이동평균)     ──┘         │
+                                                    └──► CSV Logger
 ```
 
 **센서 퓨전 판단 로직**
@@ -68,6 +68,7 @@ RasEyes/
     ├── test_logger.py        # CsvLogger 스키마·기록 검증
     ├── test_vision.py        # MockVision·MockCamera 동작 검증
     ├── test_fps_fallback.py  # FPS Fallback 통합 테스트
+    ├── test_longevity.py     # 장기 안정성 (메모리 누수 검증)
     └── benchmark_vision.py   # YoloDetector KPI 벤치마크
 ```
 
@@ -108,7 +109,7 @@ python main.py
 ## 테스트
 
 ```bash
-# 전체 테스트 실행 (현재 52개 통과)
+# 전체 테스트 실행 (현재 72개 통과)
 pytest
 
 # 커버리지 포함
@@ -144,7 +145,7 @@ python -m tests.benchmark_vision --frames 100
 | 0 | 프로젝트 기반 구축 | ✅ 완료 |
 | 1 | PC Mock 파이프라인 완성 | ✅ 완료 |
 | 2 | YOLOv8 + MPS 비전 AI 통합 | ✅ 완료 |
-| 3 | pytest 테스트 스위트 구축 | 🔄 진행 중 (5/6) |
+| 3 | pytest 테스트 스위트 구축 | ✅ 완료 |
 | 4 | RPi 5 하드웨어 이식 | 🔲 예정 |
 | 5 | 시스템 최적화 및 안정화 | 🔲 예정 |
 | 6 | PoC 베타 테스트 | 🔲 예정 |

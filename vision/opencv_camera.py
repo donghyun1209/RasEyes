@@ -32,6 +32,7 @@ class OpenCVCamera(BaseCameraHAL):
         self._height = height
         self._fps = fps
         self._cap: cv2.VideoCapture | None = None
+        self._needs_resize: bool = False  # start()에서 실제 해상도 확인 후 결정
 
     def start(self) -> None:
         """VideoCapture를 열고 해상도·FPS를 설정한다.
@@ -52,10 +53,11 @@ class OpenCVCamera(BaseCameraHAL):
 
         actual_w = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         actual_h = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        if actual_w != self._width or actual_h != self._height:
+        self._needs_resize = actual_w != self._width or actual_h != self._height
+        if self._needs_resize:
             logger.warning(
                 "카메라가 요청 해상도(%dx%d)를 지원하지 않아 실제 해상도(%dx%d)로 동작합니다. "
-                "read_frame()에서 리사이징이 수행됩니다.",
+                "read_frame()에서 소프트웨어 리사이징이 수행됩니다.",
                 self._width,
                 self._height,
                 actual_w,
@@ -84,7 +86,7 @@ class OpenCVCamera(BaseCameraHAL):
         ret, frame = self._cap.read()
         if not ret or frame is None:
             raise RuntimeError("프레임 캡처 실패 — 카메라 연결을 확인하세요.")
-        if frame.shape[1] != self._width or frame.shape[0] != self._height:
+        if self._needs_resize:
             frame = cv2.resize(frame, (self._width, self._height), interpolation=cv2.INTER_NEAREST)
         return frame
 

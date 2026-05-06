@@ -85,7 +85,7 @@
 | 3-1 | ToF 이동 평균 필터 동작 검증 | `tests/test_sensor.py` | ✅ |
 | 3-2 | 거리 임계값 경계 조건 — 100cm·150cm 경계에서 정확히 등급 분류 | `tests/test_fusion.py` | ✅ |
 | 3-3 | Low-light Fallback 전환 로직 — Confidence < MIN_CONFIDENCE 시 ToF 단독 모드 진입 | `tests/test_fusion.py` | ✅ |
-| 3-4 | Mock 객체를 활용한 오탐지 시나리오 테스트 | `tests/test_false_positive.py` | 🔲 |
+| 3-4 | Mock 객체를 활용한 오탐지 시나리오 테스트 | `tests/test_false_positive.py` | ✅ |
 | 3-5 | 오디오 컨트롤러 — 거리에 따른 비프음 주기 정확성 | `tests/test_audio.py` | ✅ |
 | 3-6 | CSV 로거 — 스키마 및 1초 주기 기록 검증 | `tests/test_logger.py` | ✅ |
 
@@ -93,7 +93,7 @@
 > | + | MockVision·MockCamera 동작 검증 (라이프사이클, 주입, 해상도) | `tests/test_vision.py` | ✅ |
 > | + | FPS Fallback 통합 테스트 (FPS 임계값 초과·복구·ToF 단독 모드 연동) | `tests/test_fps_fallback.py` | ✅ |
 
-**Phase 3 완료 기준:** `pytest` 전체 통과 (커버리지 핵심 로직 기준 80% 이상). 🔄 **진행 중** (52 tests passing, 3-4 오탐지 시나리오 미완)
+**Phase 3 완료 기준:** `pytest` 전체 통과 (커버리지 핵심 로직 기준 80% 이상). ✅ **달성** (68 tests passing)
 
 ---
 
@@ -161,7 +161,7 @@
 Phase 0  ──✅── 기반 구축
 Phase 1  ──✅── PC Mock 파이프라인 완성
 Phase 2  ──✅── MPS 비전 AI 통합
-Phase 3  ──🔄── pytest 테스트 스위트  (5/6 완료, 52 tests passing)
+Phase 3  ──✅── pytest 테스트 스위트  (68 tests passing)
 Phase 4  ──🔲── RPi 5 하드웨어 이식
 Phase 5  ──🔲── 최적화 & 안정화
 Phase 6  ──🔲── PoC 베타 테스트

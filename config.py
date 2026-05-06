@@ -34,3 +34,10 @@ BENCHMARK_WARMUP_FRAMES: int = 5
 # Worker Thread Recovery
 REINIT_MAX_RETRIES: int = 5
 REINIT_DELAY_SEC: float = 1.0
+
+# Vision Worker Watchdog
+VISION_STALL_THRESHOLD_SEC: float = 2.0
+
+# ToF Sensor Out-of-Range Handling
+TOF_OUT_OF_RANGE_CM: float = 400.0   # VL53L1X 최대 유효 범위 초과 기준
+OOR_SOFT_RESET_COUNT: int = 3        # 연속 OoR 횟수 이상이면 필터 소프트 리셋

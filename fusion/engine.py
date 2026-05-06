@@ -43,6 +43,7 @@ class FusionEngine:
 
     def __init__(self) -> None:
         self._filter = MovingAverageFilter()
+        self._oor_count: int = 0  # 연속 Out-of-Range 카운터
 
     def evaluate(
         self,
@@ -62,6 +63,16 @@ class FusionEngine:
             FusionResult 인스턴스.
         """
         effective_min_conf = min_confidence if min_confidence is not None else config.MIN_CONFIDENCE
+
+        # OoR 소프트 리셋: 장시간 OoR 구간이 끝난 뒤 유효값이 빠르게 반영되도록 버퍼 초기화
+        if raw_distance_cm > config.TOF_OUT_OF_RANGE_CM:
+            self._oor_count += 1
+            if self._oor_count >= config.OOR_SOFT_RESET_COUNT:
+                self._filter.reset()
+                self._oor_count = 0
+        else:
+            self._oor_count = 0
+
         filtered_dist = self._filter.update(raw_distance_cm)
 
         max_conf = max((d.confidence for d in detections), default=0.0)
@@ -80,8 +91,9 @@ class FusionEngine:
         return FusionResult(RiskLevel.NONE, filtered_dist, tof_only_mode=False)
 
     def reset_filter(self) -> None:
-        """이동 평균 필터 버퍼를 초기화한다."""
+        """이동 평균 필터 버퍼와 OoR 카운터를 초기화한다."""
         self._filter.reset()
+        self._oor_count = 0
 
     def _tof_only_risk(self, distance_cm: float) -> RiskLevel:
         """ToF 단독 모드에서 거리 기반 위험 수준을 반환한다."""

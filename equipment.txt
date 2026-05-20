@@ -115,3 +115,5 @@ KPI 기준: E2E Latency < 500ms · 추론 < 60ms (15+ FPS) · On-device 100%
  C270 웹캠  →  vision/opencv_camera.py  (기존 코드 그대로 사용 가능)
  BT 이어폰  →  audio/bluetooth_hal.py   (BaseAudioHAL 구현)
  GPIO 부저  →  audio/buzzer_hal.py      (BT fallback)
+
+

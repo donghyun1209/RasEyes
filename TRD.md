@@ -3,7 +3,7 @@
 ## 1. Executive Summary & Context
 
 **Vision:**
-RasEyes는 시각장애인이 보행 중 겪는 상단(가슴~머리 높이) 사각지대의 충돌 위험을 해결하기 위한 웨어러블 엣지 디바이스입니다. 본 문서는 Raspberry Pi 5 기반의 하드웨어와 TFLite 기반의 비전 AI 모델, ToF 센서를 결합하여 완전한 오프라인 환경에서 실시간(Low Latency)으로 위험을 탐지하고 피드백을 제공하는 시스템의 기술적 명세를 정의합니다.
+RasEyes는 시각장애인이 보행 중 겪는 상단(가슴~머리 높이) 사각지대의 충돌 위험을 해결하기 위한 웨어러블 엣지 디바이스입니다. 본 문서는 Orange Pi 5 (4GB, RK3588S+NPU 6TOPS) 기반의 하드웨어와 RKNN 기반의 비전 AI 모델, ToF 센서를 결합하여 완전한 오프라인 환경에서 실시간(Low Latency)으로 위험을 탐지하고 피드백을 제공하는 시스템의 기술적 명세를 정의합니다.
 
 **Goals vs Non-Goals:**
 * **Goals:** On-device 100% 오프라인 구동, 전체 시스템 지연 시간 < 500ms, 센서 퓨전(Camera + ToF)을 통한 인식 정확도 확보.
@@ -19,31 +19,29 @@ RasEyes는 시각장애인이 보행 중 겪는 상단(가슴~머리 높이) 사
 ```mermaid
 graph TD
     subgraph "Hardware Input"
-        Cam[Camera Module 3]
-        ToF[VL53L1X ToF]
+        Cam[USB 웹캠 / MIPI CSI]
+        ToF[VL53L1X ToF / I2C5_M3]
         Btn[Push Button]
     end
 
-    subgraph "Compute Layer (RPi 5)"
-        VD[Vision Module: YOLOv8 Nano TFLite]
-        DD[Distance Module: I2C Reader]
+    subgraph "Compute Layer (Orange Pi 5 / RK3588S)"
+        VD[Vision Module: YOLOv8 Nano RKNN]
+        DD[Distance Module: I2C5 Reader]
         SF[Sensor Fusion Engine]
         Sys[System & Power Manager]
     end
 
     subgraph "Feedback Output"
-        BT[Bluetooth Audio Service]
-        Buz[Hardware Buzzer]
-        Log[NVMe Local Logger]
+        AJ[3.5mm Jack Audio / ALSA]
+        Log[MicroSD Local Logger]
     end
 
     Cam --> VD
     ToF --> DD
     VD --> SF
     DD --> SF
-    SF --> BT
+    SF --> AJ
     Btn --> Sys
-    Sys --> Buz
     SF --> Log
 ```
 
@@ -80,7 +78,7 @@ sequenceDiagram
 | Req ID | Feature | Tech Specs | Success Metrics | Fallback |
 | :--- | :--- | :--- | :--- | :--- |
 | **FR-01** | **Headless Boot** | `systemd` 서비스 자동 실행 및 오디오 큐 송출. | 부팅 후 가동까지 **< 45초**. | 부저 에러 패턴 출력. |
-| **FR-02** | **Vision Inference** | YOLOv8 Nano (TFLite) 모델 최적화 구동. | 추론 지연 시간 **< 60ms**. | ToF 단독 모드 전환. |
+| **FR-02** | **Vision Inference** | YOLOv8 Nano (RKNN) NPU 가속 구동. | 추론 지연 시간 **< 60ms**. | ToF 단독 모드 전환. |
 | **FR-03** | **Sensor Fusion** | BBox 영역 내 ToF 거리 매핑 및 필터링. | 오탐지 시간당 **< 5회**. | 이동 평균 필터 적용. |
 | **FR-04** | **Audio Feedback** | 거리에 따른 비프음 주기(Period) 가변 제어. | 이벤트 발생 시 출력 **< 100ms**. | 보드 내장 부저 출력. |
 
@@ -89,7 +87,7 @@ sequenceDiagram
 ## 4. Data & API Design
 
 ### 4.1 Local Data Schema (CSV Logging)
-성능 분석과 디버깅을 위해 NVMe SSD에 다음 데이터를 기록합니다.
+성능 분석과 디버깅을 위해 MicroSD에 다음 데이터를 기록합니다.
 * `timestamp`: ISO 8601 (ms 단위)
 * `cpu_temp`: °C (스로틀링 모니터링)
 * `fps`: Integer (실시간 성능 기록)
@@ -108,6 +106,7 @@ sequenceDiagram
 
 ## 6. Risks & Infrastructure
 
-* **발열 스로틀링:** AI 연산 부하로 인한 성능 저하 위험. 전용 쿨러 및 냉각 구조 케이스 설계로 대응.
-* **블루투스 안정성:** 리눅스 오디오 스택 불안정성 대응을 위한 자동 재시작(Watchdog) 스크립트 상주.
+* **발열 스로틀링:** AI 연산 부하로 인한 성능 저하 위험. 5V Fan 헤더 직결 쿨러 + 케이스 통풍구 설계로 대응. 80°C 초과 시 FPS 자동 하향(Graceful Degradation).
+* **RKNN 모델 변환:** YOLOv8 ONNX → .rknn 변환은 PC에서 rknn-toolkit2로 사전 수행. 보드에서는 rknnlite2로 추론만 실행.
+* **오디오 HAL 안정성:** ALSA 드라이버 초기화 실패 시 재시도 로직 필요. ES8388 코덱 설정 이슈 발생 가능.
 * **배포 전략:** GitHub 원격 저장소를 통한 코드 업데이트 및 Ansible 기반의 환경 구성 자동화.

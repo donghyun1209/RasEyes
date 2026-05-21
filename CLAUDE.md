@@ -2,14 +2,14 @@
 
 ## 1. Project Overview
 * **RasEyes:** 시각장애인용 상단 사각지대(가슴~머리 높이) 장애물 탐지 웨어러블 엣지 AI 디바이스.
-* **Target HW:** Raspberry Pi 5, Camera Module 3, VL53L1X(ToF), 블루투스 골전도 이어폰.
+* **Target HW:** Orange Pi 5 (4GB, RK3588S+NPU), USB 웹캠(미구매), VL53L1X(ToF), 3.5mm 이어폰 잭 출력.
 * **Current Phase:** PC 환경(macOS M5, Python 3.11, venv)에서의 모킹(Mocking) 기반 선행 개발 및 검증.
 * **Constraints:** 100% On-device, 외부 API/Cloud 사용 불가.
 * **KPIs:** End-to-End Latency < 500ms, 추론 < 60ms(15+ FPS), 탐지 Recall > 95%, 오탐지 < 1회/분.
 
 ## 2. Project Structure & Rules
 * `/vision`, `/sensor`, `/fusion`, `/audio` 등 도메인별 폴더 분리. `main.py`는 오케스트레이션만 담당.
-* 입력(비전, 센서)과 출력(오디오)은 반드시 추상화 계층(HAL) 인터페이스를 적용하여, 현재의 PC 모킹 클래스와 추후 RPi 하드웨어 제어 클래스를 쉽게 교체할 수 있도록 구현.
+* 입력(비전, 센서)과 출력(오디오)은 반드시 추상화 계층(HAL) 인터페이스를 적용하여, 현재의 PC 모킹 클래스와 추후 Orange Pi 5 하드웨어 제어 클래스를 쉽게 교체할 수 있도록 구현.
 * 상수 및 임계값은 매직 넘버 대신 `config.py`에 분리.
 * 타입 힌트와 구글 스타일 Docstring 필수 작성. 예외 처리 철저.
 

@@ -98,22 +98,22 @@
 
 ---
 
-## Phase 4 · RPi 5 하드웨어 이식 (On-Device)
-> 목표: HAL 구현체만 교체하여 동일 코드베이스를 RPi에서 구동
+## Phase 4 · Orange Pi 5 하드웨어 이식 (On-Device)
+> 목표: HAL 구현체만 교체하여 동일 코드베이스를 Orange Pi 5에서 구동
 
 ### 4-A. 하드웨어 HAL 구현체 작성
 | # | 작업 | 파일 |
 |---|------|------|
-| 4-A-1 | `PiCamera3HAL` — `picamera2` 라이브러리 기반 구현 | `vision/picamera_hal.py` |
-| 4-A-2 | `VL53L1XHAL` — I2C 드라이버 기반 ToF 구현 | `sensor/vl53l1x_hal.py` |
-| 4-A-3 | `BluetoothAudioHAL` — BlueZ + PipeWire 기반 오디오 구현 | `audio/bluetooth_hal.py` |
-| 4-A-4 | `BuzzerHAL` — GPIO 비상 부저 구현 (BT 연결 끊김 fallback) | `audio/buzzer_hal.py` |
+| 4-A-1 | `USBCameraHAL` — OpenCV VideoCapture(0) USB 웹캠 구현 | `vision/usb_camera_hal.py` |
+| 4-A-2 | `VL53L1XHAL` — smbus2 I2C5_M3 버스 기반 ToF 구현 | `sensor/vl53l1x_hal.py` |
+| 4-A-3 | `JackAudioHAL` — ALSA/playsound 3.5mm 잭 오디오 구현 | `audio/jack_hal.py` |
 
-### 4-B. YOLOv8 → TFLite 변환 및 최적화
+### 4-B. YOLOv8 → RKNN 변환 및 NPU 최적화
 | # | 작업 | 비고 |
 |---|------|------|
-| 4-B-1 | YOLOv8 Nano → TFLite INT8 양자화(Quantization) 변환 | `scripts/export_tflite.py` |
-| 4-B-2 | RPi 5에서 TFLite 추론 속도 측정 및 튜닝 | 목표: < 60ms |
+| 4-B-1 | YOLOv8 Nano ONNX → `.rknn` INT8 변환 (PC에서 rknn-toolkit2 사용) | `scripts/export_rknn.py` |
+| 4-B-2 | Orange Pi 5에서 rknnlite2 추론 속도 측정 및 튜닝 | 목표: < 60ms |
+| 4-B-3 | CPU 추론 fallback 유지 (rknnlite2 초기화 실패 시 PyTorch CPU) | `vision/detector.py` |
 
 ### 4-C. 시스템 서비스 구성
 | # | 작업 | 파일 |
@@ -121,9 +121,9 @@
 | 4-C-1 | `systemd` 서비스 유닛 파일 작성 (전원 인가 시 자동 실행) | `raseyes.service` |
 | 4-C-2 | 부팅 완료 → "RasEyes가 준비되었습니다" 오디오 큐 구현 | `audio/boot_sequence.py` |
 | 4-C-3 | 물리 버튼(GPIO) 이벤트 핸들러 구현 | `sensor/button_handler.py` |
-| 4-C-4 | 부팅 시간 < 45초 달성 검증 | - |
+| 4-C-4 | 부팅 시간 < 45초 달성 검증 (Armbian 경량 설정 포함) | - |
 
-**Phase 4 완료 기준:** RPi에서 Mock 없이 실제 하드웨어로 동일 파이프라인 동작, 부팅 후 오디오 큐 출력.
+**Phase 4 완료 기준:** Orange Pi 5에서 Mock 없이 실제 하드웨어로 동일 파이프라인 동작, 부팅 후 오디오 큐 출력.
 
 ---
 
@@ -163,7 +163,7 @@ Phase 0  ──✅── 기반 구축
 Phase 1  ──✅── PC Mock 파이프라인 완성
 Phase 2  ──✅── MPS 비전 AI 통합
 Phase 3  ──✅── pytest 테스트 스위트  (72 tests passing)
-Phase 4  ──🔲── RPi 5 하드웨어 이식
+Phase 4  ──🔲── Orange Pi 5 하드웨어 이식
 Phase 5  ──🔲── 최적화 & 안정화
 Phase 6  ──🔲── PoC 베타 테스트
 ```
@@ -174,9 +174,9 @@ Phase 6  ──🔲── PoC 베타 테스트
 
 | 영역 | PC (개발·검증) | RPi 5 (프로덕션) |
 |------|----------------|-----------------|
-| Vision | YOLOv8 Nano + PyTorch MPS | YOLOv8 Nano TFLite INT8 |
-| Camera | OpenCV (파일/웹캠) | picamera2 (Camera Module 3) |
-| ToF | MockToFSensor | VL53L1X I2C 드라이버 |
-| Audio | 콘솔 시뮬레이션 | BlueZ / PipeWire + GPIO Buzzer |
+| Vision | YOLOv8 Nano + PyTorch MPS | YOLOv8 Nano RKNN INT8 (NPU) |
+| Camera | OpenCV (파일/웹캠) | OpenCV USB 웹캠 / MIPI CSI |
+| ToF | MockToFSensor | VL53L1X I2C5_M3 드라이버 (smbus2) |
+| Audio | 콘솔 시뮬레이션 | ALSA / playsound (3.5mm 잭) |
 | OS 서비스 | 직접 실행 | systemd 데몬 |
 | 테스트 | pytest + Mock | pytest (On-device) |

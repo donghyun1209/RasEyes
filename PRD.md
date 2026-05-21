@@ -10,7 +10,7 @@
 ---
 
 ## 1. Executive Summary & Context (The 'Why')
-시각장애인의 독립적인 보행은 삶의 질과 직결되는 문제입니다. 기존의 보조 공학 기기들은 수백만 원에 달하거나, 스마트폰을 손에 들고 조작해야 하는 등 실사용성이 떨어집니다. RasEyes는 합리적인 가격의 상용 임베디드 보드(Raspberry Pi 5)와 엣지 AI(Edge AI)를 결합하여, 사용자의 두 손을 자유롭게 하고 상단 사각지대를 해소하는 '웨어러블 보행 보조 시스템'의 Zero to One(PoC) 모델입니다. 이 프로젝트는 단순한 기술적 과시가 아니라, 생존과 직결된 물리적 문제를 On-device AI로 해결하는 실질적인 엔지니어링 챌린지입니다.
+시각장애인의 독립적인 보행은 삶의 질과 직결되는 문제입니다. 기존의 보조 공학 기기들은 수백만 원에 달하거나, 스마트폰을 손에 들고 조작해야 하는 등 실사용성이 떨어집니다. RasEyes는 합리적인 가격의 상용 임베디드 보드(Orange Pi 5, RK3588S+NPU 6TOPS)와 엣지 AI(Edge AI)를 결합하여, 사용자의 두 손을 자유롭게 하고 상단 사각지대를 해소하는 '웨어러블 보행 보조 시스템'의 Zero to One(PoC) 모델입니다. 이 프로젝트는 단순한 기술적 과시가 아니라, 생존과 직결된 물리적 문제를 On-device AI로 해결하는 실질적인 엔지니어링 챌린지입니다.
 
 ## 2. Goals & Guardrail Metrics
 
@@ -47,7 +47,7 @@
 
 ### MoSCoW Prioritization
 * **Must Have (PoC 핵심):**
-    * TFLite 기반 경량화 객체 인식 모델 실시간 구동
+    * RKNN 기반 경량화 객체 인식 모델 실시간 구동 (RK3588S NPU 활용)
     * 카메라와 ToF 센서 데이터 동기화
     * 거리에 따른 다단계 오디오(비프음) 피드백
     * Headless 부팅 및 물리 스위치 제어
@@ -73,15 +73,15 @@
 ### Edge Cases
 * **센서가 가려지거나 오염된 경우 (Sensor Blindness):** 비전 프레임의 전체 픽셀 변화가 특정 임계값 이하로 지속되면 "카메라를 확인해주세요"라는 알림 발생.
 * **극심한 역광 또는 야간 (Low Light):** 비전 모델의 Confidence Score가 떨어지면, ToF 센서 단독 모드로 Fallback하여 거리 기반 기본 경고만 수행.
-* **블루투스 이어폰 연결 끊김:** 이어폰 연결이 끊기면 라즈베리파이 보드에 부착된 소형 부저(Buzzer)에서 비상음이 울려 사용자가 인지하도록 함.
+* **오디오 출력 불량:** 3.5mm 잭 물리적 접촉 불량 또는 볼륨 설정 오류 시, ALSA 재초기화 후 시스템 비프(beep)로 fallback하여 사용자가 인지하도록 함.
 
 ## 6. Technical Considerations
 
-* **Hardware Specs:** Raspberry Pi 5 (8GB), NVMe SSD 128GB (PCIe HAT), Camera Module 3, VL53L1X(ToF), Bluetooth Earphones.
-* **AI Model:** YOLOv8 Nano 또는 MobileNet SSD. (TFLite 포맷으로 변환하여 NPU/CPU 가속 활용).
+* **Hardware Specs:** Orange Pi 5 (4GB, RK3588S+NPU 6TOPS), MicroSD 64GB, USB 웹캠 또는 MIPI CSI 카메라(미구매), VL53L1X(ToF, I2C5_M3), 3.5mm 오디오 잭(보드 내장), 내장 MIC.
+* **AI Model:** YOLOv8 Nano. (RKNN 포맷으로 변환하여 RK3588S NPU 가속 활용. PC 개발 단계에서는 PyTorch MPS 추론).
 * **Data Schema (Local Log용):** 디버깅을 위해 로컬 `.csv` 파일에 초당 1회 상태를 기록.
     * `timestamp`, `cpu_temp`, `fps`, `object_detected(bool)`, `closest_distance(cm)`
-* **System Architecture:** Linux OS 기반, `systemd`를 활용한 데몬(Daemon) 서비스 등록. 전원이 켜지면 파이썬 메인 스크립트가 자동 실행되도록 구성.
+* **System Architecture:** Linux OS(Armbian/Ubuntu) 기반, `systemd`를 활용한 데몬(Daemon) 서비스 등록. 전원이 켜지면 파이썬 메인 스크립트가 자동 실행되도록 구성.
 
 ## 7. Go-To-Market (GTM) & Analytics
 

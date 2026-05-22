@@ -96,12 +96,12 @@ KPI: E2E Latency < 500ms · 추론 < 60ms (15+ FPS) · On-device 100%
  4. Orange Pi 5 — 기본 OS 세팅
 ================================================================
 
- [3-1] OS 설치]
+ [3-1] OS 설치
    - 권장 OS: Armbian (bookworm/jammy) 또는 Orange Pi 공식 Ubuntu 22.04
    - 이미지 출처: https://www.armbian.com/orangepi5/
    - 설치: balenaEtcher로 microSD에 플래시 후 부팅
 
- [3-2] I2C 활성화 (VL53L1X용)]
+ [3-2] I2C 활성화 (VL53L1X용)
    Armbian 기준:
      $ sudo armbian-config
      → System → Hardware → i2c5-m3 체크 → 저장 후 재부팅
@@ -120,7 +120,7 @@ KPI: E2E Latency < 500ms · 추론 < 60ms (15+ FPS) · On-device 100%
    의존 패키지:
      $ sudo apt install i2c-tools python3-smbus
 
- [3-3] 오디오 (3.5mm 잭)]
+ [3-3] 오디오 (3.5mm 잭)
    Orange Pi 5는 3.5mm 헤드폰 잭 내장.
    Armbian 기준 ALSA 자동 인식되며 추가 설정 불필요.
 
@@ -136,14 +136,14 @@ KPI: E2E Latency < 500ms · 추론 < 60ms (15+ FPS) · On-device 100%
      $ pip install playsound pydub
      $ sudo apt install ffmpeg  # pydub 디코딩용
 
- [3-4] 쿨링 팬]
+ [3-4] 쿨링 팬
    - 방열판: SoC 위에 써멀 패드 부착 후 장착
    - 팬 커넥터: 보드 우측 엣지 "5V Fan" 2핀 헤더에 직결 (별도 GPIO 제어 불필요)
    - 온도 모니터링:
      $ watch -n 2 cat /sys/class/thermal/thermal_zone0/temp
      # 밀리도씨 단위: 55000 = 55°C / 추론 부하 시 50-65°C 정상 범위
 
- [3-5] Python 환경]
+ [3-5] Python 환경
    $ sudo apt install python3.11 python3.11-venv python3-pip
    $ python3.11 -m venv .venv
    $ source .venv/bin/activate

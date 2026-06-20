@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "fetch": {
-      "command": "uvx",
+      "command": "/home/dong/.local/bin/uvx",
       "args": ["mcp-server-fetch"]
     },
     "sequential-thinking": {
@@ -13,11 +13,11 @@
       "args": [
         "-y",
         "@modelcontextprotocol/server-filesystem",
-        "/Users/hwangdonghyun/Workspace_2/Projects/RasEyes"
+        "/home/dong/WorkSpace/RasEyes"
       ]
     },
     "shell": {
-      "command": "uvx",
+      "command": "/home/dong/.local/bin/uvx",
       "args": ["mcp-shell-server"]
     }
   }

@@ -1,0 +1,22 @@
+[Unit]
+Description=RasEyes Obstacle Detection Service
+After=network.target sound.target
+Documentation=https://github.com/donghyun1209/RasEyes
+
+[Service]
+Type=simple
+User=raseyes
+WorkingDirectory=/home/raseyes/RasEyes
+Environment="RASEYES_HW=1"
+ExecStart=/home/raseyes/RasEyes/.venv/bin/python main.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# 서비스 과부하 방지: 10초 내 5회 재시작 초과 시 중단
+StartLimitIntervalSec=10
+StartLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target

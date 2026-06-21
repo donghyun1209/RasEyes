@@ -5,7 +5,8 @@
 이 파일은 파이프라인 연결과 스레드 조정만 담당한다.
 
 환경 변수:
-    RASEYES_MOCK=1: MockVision 사용 (카메라·모델 불필요, 기본값: 0).
+    RASEYES_MOCK=1: 모든 컴포넌트를 Mock으로 교체 (카메라·모델 불필요, 기본값: 0).
+    RASEYES_HW=1:   하드웨어 HAL 사용 시도 (Orange Pi 5). 초기화 실패 시 자동 fallback.
 """
 import logging
 import os
@@ -17,6 +18,7 @@ from typing import Callable, List, Optional, Tuple
 
 import config
 from audio.beep_controller import BeepController
+from audio.hal import BaseAudioHAL
 from audio.mock import MockAudio
 from fusion.engine import FusionEngine, RiskLevel
 from logs.logger import CsvLogger
@@ -33,6 +35,58 @@ logger = logging.getLogger(__name__)
 # 각 큐는 최신 1개만 유지하면 충분하지만 burst 여유를 위해 2슬롯 확보
 _Q_SIZE = 2
 _FPS_EMA_ALPHA: float = 0.2   # 실측 FPS EMA 평활화 계수
+
+
+def _read_cpu_temp() -> float:
+    """Orange Pi 5의 CPU 온도를 섭씨로 반환한다. 읽기 실패 시 0.0 반환."""
+    try:
+        with open("/sys/class/thermal/thermal_zone0/temp") as f:
+            return int(f.read().strip()) / 1000.0
+    except OSError:
+        return 0.0
+
+
+def _build_vision(use_mock: bool, use_hw: bool) -> VisionInterface:
+    """환경에 맞는 비전 컴포넌트를 생성한다."""
+    if use_mock:
+        return MockVision()
+    if use_hw:
+        try:
+            from vision.rknn_detector import RknnDetector
+            from vision.csi_camera_hal import CSICameraHAL
+            return RknnDetector(camera=CSICameraHAL())
+        except (ImportError, RuntimeError) as exc:
+            logger.warning("RKNN 초기화 실패, YoloDetector(cpu) fallback: %s", exc)
+        try:
+            from vision.csi_camera_hal import CSICameraHAL
+            return YoloDetector(camera=CSICameraHAL(), device="cpu")
+        except Exception as exc:
+            logger.warning("CSICameraHAL 초기화 실패, OpenCVCamera fallback: %s", exc)
+    return YoloDetector(camera=OpenCVCamera())
+
+
+def _build_sensor(use_mock: bool, use_hw: bool) -> BaseToFHAL:
+    """환경에 맞는 ToF 센서 컴포넌트를 생성한다."""
+    if use_mock or not use_hw:
+        return MockToFSensor(distance_cm=200.0)
+    try:
+        from sensor.vl53l1x_hal import VL53L1XHAL
+        return VL53L1XHAL()
+    except (ImportError, RuntimeError) as exc:
+        logger.warning("VL53L1XHAL 초기화 실패, MockToFSensor fallback: %s", exc)
+        return MockToFSensor(distance_cm=200.0)
+
+
+def _build_audio(use_mock: bool, use_hw: bool) -> BaseAudioHAL:
+    """환경에 맞는 오디오 컴포넌트를 생성한다."""
+    if use_mock or not use_hw:
+        return MockAudio()
+    try:
+        from audio.jack_hal import JackAudioHAL
+        return JackAudioHAL()
+    except (ImportError, RuntimeError) as exc:
+        logger.warning("JackAudioHAL 초기화 실패, MockAudio fallback: %s", exc)
+        return MockAudio()
 
 
 def _put_latest(q: "queue.Queue", item: object) -> None:
@@ -142,17 +196,17 @@ class RasEyesApp:
     캡슐화하여 가독성과 테스트 가능성을 높인다.
     """
 
-    def __init__(self, use_mock: bool = False) -> None:
+    def __init__(self, use_mock: bool = False, use_hw: bool = False) -> None:
         """Args:
-            use_mock: True이면 MockVision을 사용 (카메라·모델 불필요).
+            use_mock: True이면 모든 컴포넌트를 Mock으로 교체.
+            use_hw: True이면 Orange Pi 5 하드웨어 HAL 사용 시도.
         """
         self._use_mock = use_mock
-        self._vision: VisionInterface = (
-            MockVision() if use_mock else YoloDetector(camera=OpenCVCamera())
-        )
-        self._sensor = MockToFSensor(distance_cm=200.0)
+        self._use_hw = use_hw
+        self._vision: VisionInterface = _build_vision(use_mock, use_hw)
+        self._sensor: BaseToFHAL = _build_sensor(use_mock, use_hw)
         self._fusion = FusionEngine()
-        self._audio = MockAudio()
+        self._audio: BaseAudioHAL = _build_audio(use_mock, use_hw)
         self._beep = BeepController()
         self._csv_logger = CsvLogger()
 
@@ -324,7 +378,12 @@ class RasEyesApp:
 
             now = time.monotonic()
             if now - last_log_time >= config.LOG_INTERVAL_SEC:
-                cpu_temp = round(40.0 + random.uniform(-5.0, 5.0), 1) if self._use_mock else 0.0
+                if self._use_mock:
+                    cpu_temp = round(40.0 + random.uniform(-5.0, 5.0), 1)
+                elif self._use_hw:
+                    cpu_temp = round(_read_cpu_temp(), 1)
+                else:
+                    cpu_temp = 0.0
                 self._csv_logger.write_row(
                     tof_distance_cm=result.distance_cm,
                     alert_triggered=result.risk_level != RiskLevel.NONE,
@@ -340,7 +399,8 @@ class RasEyesApp:
 def main() -> None:
     """RasEyes 진입점."""
     use_mock = os.getenv("RASEYES_MOCK", "0") == "1"
-    RasEyesApp(use_mock=use_mock).run()
+    use_hw = os.getenv("RASEYES_HW", "0") == "1"
+    RasEyesApp(use_mock=use_mock, use_hw=use_hw).run()
 
 
 if __name__ == "__main__":

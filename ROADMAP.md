@@ -130,29 +130,44 @@
 > ```
 > (수정 없이 `set_timing` / `start_ranging` 호출 시 segfault)
 
-### 4-A. 하드웨어 HAL 구현체 작성
+### 4-A. 하드웨어 HAL 구현체 작성 ✅
+> 2026-06-21 완료
+
 | # | 작업 | 파일 | 상태 |
 |---|------|------|------|
-| 4-A-1 | `CSICameraHAL` — OpenCV VideoCapture(`/dev/video11`) MIPI CSI 구현 | `vision/csi_camera_hal.py` | 🔲 |
-| 4-A-2 | `VL53L1XHAL` — pimoroni vl53l1x (ctypes 패치 포함), i2c-5 기반 ToF 구현 | `sensor/vl53l1x_hal.py` | 🔲 |
-| 4-A-3 | `JackAudioHAL` — ALSA/playsound 3.5mm 잭 오디오 구현 | `audio/jack_hal.py` | 🔲 |
+| 4-A-1 | `CSICameraHAL` — OpenCV VideoCapture(`/dev/video11`) MIPI CSI 구현 | `vision/csi_camera_hal.py` | ✅ |
+| 4-A-2 | `VL53L1XHAL` — pimoroni vl53l1x (ctypes 패치 포함), i2c-5 기반 ToF 구현 | `sensor/vl53l1x_hal.py` | ✅ |
+| 4-A-3 | `JackAudioHAL` — sounddevice + numpy 사인파, 3.5mm 잭 오디오 구현 | `audio/jack_hal.py` | ✅ |
 
 > **참고:** 기존 로드맵의 `USBCameraHAL` → `CSICameraHAL`로 변경 (웹캠 대신 OV13855 MIPI CSI 사용).
+> `JackAudioHAL`은 playsound 대신 sounddevice + numpy 사인파 방식으로 구현 (10ms fade 클릭 방지).
 
 ### 4-B. YOLOv8 → RKNN 변환 및 NPU 최적화
 | # | 작업 | 비고 | 상태 |
 |---|------|------|------|
-| 4-B-1 | YOLOv8 Nano ONNX → `.rknn` INT8 변환 (PC에서 rknn-toolkit2 사용) | `scripts/export_rknn.py` | 🔲 |
+| 4-B-1 | YOLOv8 Nano ONNX → `.rknn` INT8 변환 (PC에서 rknn-toolkit2 사용) | `scripts/export_rknn.py` | ✅ (스크립트 완성, 실행 대기) |
 | 4-B-2 | Orange Pi 5에서 rknnlite2 추론 속도 측정 및 튜닝 | 목표: < 60ms | 🔲 |
-| 4-B-3 | CPU 추론 fallback 유지 (rknnlite2 초기화 실패 시 PyTorch CPU) | `vision/detector.py` | 🔲 |
+| 4-B-3 | CPU 추론 fallback 유지 (rknnlite2 초기화 실패 시 PyTorch CPU) | `vision/rknn_detector.py` | ✅ |
 
 ### 4-C. 시스템 서비스 구성
 | # | 작업 | 파일 | 상태 |
 |---|------|------|------|
-| 4-C-1 | `systemd` 서비스 유닛 파일 작성 (전원 인가 시 자동 실행) | `raseyes.service` | 🔲 |
-| 4-C-2 | 부팅 완료 → "RasEyes가 준비되었습니다" 오디오 큐 구현 | `audio/boot_sequence.py` | 🔲 |
-| 4-C-3 | 물리 버튼(GPIO) 이벤트 핸들러 구현 | `sensor/button_handler.py` | 🔲 |
+| 4-C-1 | `systemd` 서비스 유닛 파일 작성 (전원 인가 시 자동 실행) | `raseyes.service` | ✅ |
+| 4-C-2 | 부팅 완료 오디오 큐 구현 (MID→MID→HIGH 멜로디) | `audio/boot_sequence.py` | ✅ |
+| 4-C-3 | 물리 버튼(GPIO) 이벤트 핸들러 구현 | `sensor/button_handler.py` | ✅ |
 | 4-C-4 | 부팅 시간 < 45초 달성 검증 | - | 🔲 |
+
+### 4-D. Orange Pi 5 배포 및 현장 검증 ← **현재 단계**
+| # | 작업 | 비고 | 상태 |
+|---|------|------|------|
+| 4-D-1 | GitHub push → Orange Pi 5 git clone | `ssh raseyes 'git clone ...'` | ✅ |
+| 4-D-2 | Orange Pi 5 의존성 설치 | `pip install -r requirements-rpi.txt` | 🔲 |
+| 4-D-3 | 각 HAL 단품 동작 테스트 (CSI 카메라 / ToF / 오디오) | 수동 검증 | 🔲 |
+| 4-D-4 | `RASEYES_HW=1 python main.py` E2E 통합 테스트 | FPS≥15, 비프음 확인 | 🔲 |
+| 4-D-5 | `scripts/export_rknn.py` 실행 → `yolov8n.rknn` 생성 후 scp 전송 | PC에서 실행 | 🔲 |
+| 4-D-6 | RKNN 추론 속도 측정 (50회 평균) | 목표 < 60ms | 🔲 |
+| 4-D-7 | systemd 서비스 등록 및 부팅 자동 시작 검증 | `sudo systemctl enable raseyes` | 🔲 |
+| 4-D-8 | 부팅 시간 < 45초 달성 확인 | - | 🔲 |
 
 **Phase 4 완료 기준:** Orange Pi 5에서 Mock 없이 실제 하드웨어로 동일 파이프라인 동작, 부팅 후 오디오 큐 출력.
 
@@ -194,7 +209,7 @@ Phase 0  ──✅── 기반 구축
 Phase 1  ──✅── PC Mock 파이프라인 완성
 Phase 2  ──✅── MPS 비전 AI 통합
 Phase 3  ──✅── pytest 테스트 스위트  (72 tests passing)
-Phase 4  ──🔄── Orange Pi 5 하드웨어 이식 (4-0 환경구성 완료)
+Phase 4  ──🔄── Orange Pi 5 하드웨어 이식 (4-A/B/C 코드 완성, 4-D 현장 검증 진행 중)
 Phase 5  ──🔲── 최적화 & 안정화
 Phase 6  ──🔲── PoC 베타 테스트
 ```

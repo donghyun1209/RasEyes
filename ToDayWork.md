@@ -1,106 +1,89 @@
-# 2026-06-21 작업 일지 — Phase 4: Orange Pi 5 하드웨어 이식
+# RasEyes 개발일지 — Phase 4: 드디어 Orange Pi 5에 올린다
 
-## 목표
-PC Mock 환경(Phase 0~3)에서 검증된 코드베이스를 Orange Pi 5(RK3588S+NPU) 실 하드웨어에서 구동하기 위한 HAL 구현체 및 시스템 서비스 이식.
+> 2026-06-21
 
 ---
 
-## 완료한 작업
+## 오늘 한 일 요약
 
-### 4-A. 하드웨어 HAL 구현
+지금까지 맥북에서 Mock 환경으로만 돌리던 RasEyes를 실제 Orange Pi 5 하드웨어에서 구동하기 위한 HAL 구현체들을 전부 작성했다. 코드 구조 자체는 안 건드리고, 하드웨어별 구현체만 갈아끼우는 방식
 
-#### `config.py` — Phase 4 상수 추가
+---
+
+## 뭘 만들었냐면
+
+### 카메라 — CSI 카메라 HAL
+
+Orange Pi 5에 붙어 있는 OV13855 MIPI CSI 카메라를 OpenCV로 잡는 클래스
+
+기존 `OpenCVCamera`랑 거의 똑같은데, 카메라 인덱스(0, 1...)가 아니라 장치 경로(`/dev/video11`)를 받는다는 점이 다르다. 버퍼 크기를 1로 설정해서 프레임 지연이 쌓이지 않게 했고, 해상도가 안 맞으면 소프트웨어로 리사이즈하는 폴백도 넣었다.
+
+### ToF 센서 — VL53L1X HAL
+
+VL53L1X 드라이버를 쓰는데, 64비트 ARM(aarch64)에서 ctypes 함수 포인터 크기가 틀려서 세그폴트가 나는 버그가 있다. 공식 이슈에도 올라온 known 버그라서, 라이브러리 내부 C 함수 시그니처를 직접 재정의해서 패치했다.
+
+```python
+lib = VL53L1X._TOF_LIBRARY
+lib.initialise.restype = c_void_p
+lib.getDistance.restype = c_uint16
+# ... 나머지 argtypes도 명시
 ```
-CSI_DEVICE_PATH=/dev/video11, TOF_I2C_PORT=5, TOF_I2C_ADDRESS=0x29
-TOF_TIMING_BUDGET_US=50000, TOF_INTER_MEASUREMENT_MS=50
-RKNN_MODEL_PATH=yolov8n.rknn, GPIO_BUTTON_PIN=26
-AUDIO_SAMPLE_RATE=44100, AUDIO_HIGH_FREQ_HZ=2000.0, AUDIO_MID_FREQ_HZ=1000.0
-AUDIO_BEEP_DURATION_MS=80
+
+이거 안 하면 `start_ranging()` 호출 순간 프로세스가 죽는다.
+
+거리 읽기는 0mm(측정 범위 초과)이면 `TOF_OUT_OF_RANGE_CM`을 반환하고, 그 외엔 mm을 10으로 나눠서 cm로 돌려준다.
+
+### 오디오 — 이어폰 잭 HAL
+
+`sounddevice` + `numpy`로 사인파를 만들어서 3.5mm 잭으로 출력한다. HIGH(2000Hz), MID(1000Hz) 두 가지 주파수를 쓰고, 시작/끝 10ms에 페이드인·페이드아웃을 걸어서 "딱" 하는 클릭 노이즈를 없앴다.
+
+비동기(`blocking=False`)라서 비프음이 나오는 동안에도 메인 루프가 멈추지 않는다.
+
+---
+
+## RKNN NPU 파이프라인
+
+Orange Pi 5에는 NPU가 달려 있어서 여기서 추론을 돌릴 수 있다. PC에서 YOLOv8n 모델을 INT8로 변환해서(`scripts/export_rknn.py`) Orange Pi 5로 보내면, `RknnDetector`가 rknnlite2로 로드해서 추론한다.
+
+640×640으로 리사이즈 → NPU 추론 → NMS 후처리 → 원본 해상도 bbox 역변환 순서다.
+
+rknnlite2 설치가 안 된 환경(또는 모델 파일이 없을 때)엔 자동으로 PyTorch CPU 추론으로 폴백되도록 factory 함수에서 처리해뒀다.
+
+---
+
+## 시스템 서비스
+
+전원만 꽂으면 자동으로 실행되도록 systemd 서비스도 만들었다.
+
+```ini
+Environment="RASEYES_HW=1"
+Restart=on-failure
+RestartSec=5
 ```
 
-#### `vision/csi_camera_hal.py` — OV13855 MIPI CSI 카메라 HAL
-- `CSICameraHAL(BaseCameraHAL)`: `cv2.VideoCapture("/dev/video11")` 기반
-- `CAP_PROP_BUFFERSIZE=1`로 프레임 지연 최소화, 해상도 불일치 시 소프트웨어 리사이즈 폴백
+`RASEYES_HW=1`을 환경변수로 넣어두면 main.py가 하드웨어 HAL을 선택한다.
 
-#### `sensor/vl53l1x_hal.py` — VL53L1X ToF 센서 HAL
-- **핵심**: aarch64 64비트 ctypes 패치 적용 (함수 포인터 크기 오류 방지)
-  - `lib.initialise.restype = c_void_p` 외 6개 argtypes/restype 명시
-- `read_distance_cm()`: 0mm(범위 초과) → `TOF_OUT_OF_RANGE_CM`, 그 외 mm÷10 반환
+부팅 완료 시엔 MID → MID → HIGH 멜로디가 울려서 "준비됐다"는 신호를 준다. 시각장애인이 화면 없이 상태를 인지할 수 있게.
 
-#### `audio/jack_hal.py` — 3.5mm 이어폰 잭 오디오 HAL
-- `sounddevice` + `numpy` 사인파 생성
-- 10ms fade-in/fade-out 엔벨로프 적용(클릭 방지)
-- HIGH(2000Hz) / MID(1000Hz) / NONE 알림 레벨 지원, `blocking=False` 비동기 출력
+버튼 핸들러도 추가했다. GPIO 핀 폴링 방식이고, 50ms 디바운싱을 걸어서 채터링을 잡는다. 콜백 기반이라 나중에 뮤트 토글이나 종료 신호 등 원하는 동작을 자유롭게 연결할 수 있다.
 
 ---
 
-### 4-B. RKNN NPU 추론 파이프라인
+## 배포
 
-#### `vision/rknn_detector.py` — RKNN NPU 추론 비전 모듈
-- `VisionInterface` 완전 구현, `rknnlite2` lazy import (PC 수집 오류 없음)
-- BGR→RGB 변환, 640×640 리사이즈 → `rknn.inference` → `cv2.dnn.NMSBoxes` NMS 후처리
-- bbox 좌표를 원본 프레임 해상도로 역변환하여 `DetectionResult` 반환
+코드를 GitHub에 push하고, Orange Pi 5에서 git clone으로 받았다.
 
-#### `scripts/export_rknn.py` — PC 측 RKNN 모델 변환 스크립트
-- YOLOv8n `.pt` → ONNX → RKNN INT8 양자화 변환
-- `argparse` 기반 CLI (`--model`, `--output`, `--dataset`, `--no-quant`)
-- `rknn-toolkit2` 필요 (PC 전용, Orange Pi 5 미설치)
-
----
-
-### 4-C. 시스템 서비스 및 주변 기능
-
-#### `raseyes.service` — systemd 자동 시작 서비스
-- `Environment="RASEYES_HW=1"`, `Restart=on-failure`, `RestartSec=5`, `StartLimitBurst=5`
-- 등록: `sudo cp raseyes.service /etc/systemd/system/ && sudo systemctl enable raseyes`
-
-#### `audio/boot_sequence.py` — 부팅 완료 오디오 큐
-- `BootSequence.play(audio_hal)`: MID(0.15s) → MID(0.15s) → HIGH 멜로디 시퀀스
-
-#### `sensor/button_handler.py` — 물리 버튼 GPIO 핸들러
-- `gpiod` lazy import, daemon 스레드 20ms 폴링, 50ms 디바운싱
-- falling-edge 감지, `on_press: Callable[[], None]` 콜백 기반
-
-#### `main.py` — 환경변수 기반 HAL factory 함수 추가
-- `_build_vision()`, `_build_sensor()`, `_build_audio()` factory 함수
-- `RASEYES_MOCK=1` → 전체 Mock, `RASEYES_HW=1` → 하드웨어 HAL, 기본 → PC 혼합 모드
-- `_read_cpu_temp()`: HW 모드에서 `/sys/class/thermal/thermal_zone0/temp` 읽기
-
-#### `logs/logger.py` + `logs/__init__.py` — CSV 운영 로거 (누락 파일 생성)
-- pytest 수집 시 `ModuleNotFoundError: No module named 'logs'` 오류 발견 및 수정
-- `CsvLogger`: `open()`, `write_row()`, `close()` 인터페이스, 헤더 자동 작성
-
-#### `requirements-rpi.txt` — 의존성 추가
-- `VL53L1X>=0.0.5`, `sounddevice>=0.4.6`, `gpiod>=2.0.0`, rknnlite2 주석 안내
-
----
-
-## 발견된 버그 및 수정
-
-| 문제 | 원인 | 수정 |
-|------|------|------|
-| `ModuleNotFoundError: No module named 'logs'` | `logs/` 디렉터리가 git에 미추가 | `logs/__init__.py`, `logs/logger.py` 생성 |
-| pytest 미설치 | miniconda3 환경에 없음 | `pip install pytest pytest-cov` |
-
----
-
-## 테스트 결과
-
-```
-72개 pytest 테스트 전체 통과 (PC Mock 모드)
+```bash
+ssh raseyes 'git clone https://github.com/donghyun1209/RasEyes.git ~/RasEyes'
 ```
 
 ---
 
-## 다음 단계 (TODO)
+## 다음에 할 것
 
-- [ ] `scripts/export_rknn.py` 실행으로 `yolov8n.rknn` 생성 후 `scp`로 Orange Pi 5 전송
-- [ ] Orange Pi 5에서 각 HAL 단품 테스트
-  ```bash
-  python -c "from vision.csi_camera_hal import CSICameraHAL; ..."
-  python -c "from sensor.vl53l1x_hal import VL53L1XHAL; ..."
-  python -c "from audio.jack_hal import JackAudioHAL; ..."
-  ```
-- [ ] `RASEYES_HW=1 python main.py` 통합 E2E 테스트 (FPS≥15, 비프음 확인)
+- [ ] Orange Pi 5에서 의존성 설치 (`pip install -r requirements-rpi.txt`)
+- [ ] 카메라 / ToF / 오디오 단품 테스트
+- [ ] `RASEYES_HW=1 python main.py` 통합 테스트 (FPS≥15, 비프음 확인)
+- [ ] `scripts/export_rknn.py`로 `yolov8n.rknn` 생성 후 scp로 전송
+- [ ] RKNN 추론 속도 측정 (목표 < 60ms)
 - [ ] systemd 서비스 등록 및 부팅 자동 시작 검증
-- [ ] RKNN 추론 속도 측정 (목표: 평균 <60ms)

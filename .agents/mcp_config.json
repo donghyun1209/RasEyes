@@ -1,0 +1,24 @@
+{
+  "mcpServers": {
+    "fetch": {
+      "command": "/home/dong/.local/bin/uvx",
+      "args": ["mcp-server-fetch"]
+    },
+    "sequential-thinking": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"]
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/home/dong/WorkSpace/RasEyes"
+      ]
+    },
+    "shell": {
+      "command": "/home/dong/.local/bin/uvx",
+      "args": ["mcp-shell-server"]
+    }
+  }
+}

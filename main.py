@@ -55,6 +55,8 @@ def _build_vision(use_mock: bool, use_hw: bool) -> VisionInterface:
             from rknnlite.api import RKNNLite  # noqa: F401 — package availability check
             from vision.rknn_detector import RknnDetector
             from vision.csi_camera_hal import CSICameraHAL
+            if not os.path.exists(config.RKNN_MODEL_PATH):
+                raise RuntimeError(f"RKNN 모델 파일 없음: {config.RKNN_MODEL_PATH} — scp yolov8n.rknn raseyes:~/RasEyes/")
             return RknnDetector(camera=CSICameraHAL())
         except (ImportError, RuntimeError) as exc:
             logger.warning("RKNN 초기화 실패, YoloDetector(cpu) fallback: %s", exc)

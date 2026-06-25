@@ -5,10 +5,11 @@ Documentation=https://github.com/donghyun1209/RasEyes
 
 [Service]
 Type=simple
-User=raseyes
-WorkingDirectory=/home/raseyes/RasEyes
+User=orangepi
+WorkingDirectory=/home/orangepi/RasEyes
 Environment="RASEYES_HW=1"
-ExecStart=/home/raseyes/RasEyes/.venv/bin/python main.py
+Environment="PYTHONPATH=/home/orangepi/RasEyes"
+ExecStart=/usr/bin/python3 /home/orangepi/RasEyes/main.py
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

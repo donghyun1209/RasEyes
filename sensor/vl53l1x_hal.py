@@ -13,6 +13,9 @@ class VL53L1XHAL(BaseToFHAL):
     Orange Pi 5에서 I2C5_M3(i2c-5)로 연결된 VL53L1X(주소 0x29)를 제어한다.
     64비트 aarch64 환경의 ctypes 버그를 start()에서 자동 수정한다.
 
+    Ranging mode: MEDIUM(2) — 최대 3m, 최소 33ms 타이밍 버짓.
+    (LONG(3)은 최소 140ms 필요; 50ms 설정 시 측정 주기가 1s 이상으로 늘어 데이터 만료 발생)
+
     Args:
         i2c_port: I2C 버스 번호 (Orange Pi 5 기본값: 5).
         timing_budget_us: 측정 타이밍 버짓 (마이크로초).
@@ -66,7 +69,7 @@ class VL53L1XHAL(BaseToFHAL):
             self._tof.set_timing(
                 self._timing_budget_us, self._inter_measurement_ms
             )
-            self._tof.start_ranging(3)  # 3 = LONG (최대 거리, 연속 측정 모드)
+            self._tof.start_ranging(2)  # 2 = MEDIUM (최대 3m, 33ms+ 타이밍 버짓 지원 → 50ms OK)
         except Exception as exc:
             self._tof = None
             raise RuntimeError(f"VL53L1X 초기화 실패: {exc}") from exc

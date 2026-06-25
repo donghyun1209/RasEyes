@@ -1,0 +1,54 @@
+name: Build RKNN Model
+
+on:
+  workflow_dispatch:
+    inputs:
+      quant:
+        description: 'INT8 양자화 활성화 (true/false)'
+        required: false
+        default: 'false'
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install rknn-toolkit2
+        run: |
+          pip install \
+            https://github.com/airockchip/rknn-toolkit2/raw/master/rknn-toolkit2/packages/rknn_toolkit2-2.3.2-cp310-cp310-linux_x86_64.whl
+
+      - name: Install ultralytics (ONNX export)
+        run: pip install ultralytics onnx onnxsim
+
+      - name: Download YOLOv8n weights
+        run: python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
+
+      - name: Convert to RKNN
+        run: |
+          FLAG=""
+          if [ "${{ github.event.inputs.quant }}" != "true" ]; then
+            FLAG="--no-quant"
+          fi
+          PYTHONPATH=. python scripts/export_rknn.py \
+            --model yolov8n.pt \
+            --output yolov8n.rknn \
+            $FLAG
+
+      - name: Verify output
+        run: ls -lh yolov8n.rknn
+
+      - name: Upload RKNN model
+        uses: actions/upload-artifact@v4
+        with:
+          name: yolov8n-rknn-rk3588
+          path: yolov8n.rknn
+          retention-days: 30

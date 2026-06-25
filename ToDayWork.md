@@ -15,21 +15,21 @@
 - `main.py`:
   - rknnlite2/ultralytics/PortAudio 미설치 시 `start()` 크래시 대신 graceful fallback 추가
 
+### 추가 완료 (2026-06-25 오후)
+- [x] systemd 서비스 등록 — `enabled`, `active (running)` 확인
+- [x] 부팅 시간 — kernel 3.8s + userspace 7.2s = **11초** (KPI 45초 통과)
+- [x] RKNN 모델 미설치 시 crash 버그 수정 — `_build_vision()`에서 파일 존재 확인 후 MockVision fallback
+
 ### 남은 작업
 
 - [ ] `sudo apt install -y libportaudio2` — JackAudioHAL 오디오 출력 활성화
-- [ ] rknnlite2 설치:
-  ```
-  pip3 install --user https://github.com/airockchip/rknn-toolkit2/raw/master/rknn-toolkit-lite2/packages/rknn_toolkit_lite2-2.3.2-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
-  ```
 - [ ] `scripts/export_rknn.py`로 `yolov8n.rknn` 생성 후 scp 전송 (x86 Linux 환경 필요)
+  ```bash
+  scp yolov8n.rknn raseyes:~/RasEyes/
+  ```
 - [ ] RKNN 추론 속도 측정: `python3 scripts/bench_rknn.py` (목표 < 60ms)
-- [ ] systemd 서비스 등록:
-  ```
-  sudo cp ~/RasEyes/raseyes.service /etc/systemd/system/
-  sudo systemctl daemon-reload && sudo systemctl enable raseyes && sudo systemctl start raseyes
-  ```
 
 ### 참고 — 하드웨어 한계
 - CSI 카메라 FPS: ~10 FPS (KPI 15 FPS 미달, `/dev/video11` V4L2 드라이버 한계)
 - RKNN/torch 없으면 자동으로 MockVision fallback → ToF+오디오 파이프라인은 정상 동작
+- rknnlite2 설치됨, ultralytics/libportaudio2 미설치 상태로 MockVision+MockAudio 모드 실행 중

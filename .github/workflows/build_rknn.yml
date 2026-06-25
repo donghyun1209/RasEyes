@@ -25,7 +25,13 @@ jobs:
         run: |
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
-      - name: Install rknn-toolkit2 dependencies
+      - name: Install numpy first (fast-histogram build dep)
+        run: pip install "numpy<=1.26.4"
+
+      - name: Install fast-histogram (source build needs numpy headers)
+        run: pip install "fast-histogram>=0.11"
+
+      - name: Install remaining rknn-toolkit2 dependencies
         run: |
           pip install \
             "protobuf>=4.21.6,<=4.25.4" \
@@ -34,14 +40,12 @@ jobs:
             "scipy>=1.9.3" \
             "tqdm>=4.64.1" \
             "opencv-python-headless>=4.5.5.64" \
-            "fast-histogram>=0.11" \
-            "numpy<=1.26.4" \
             "onnx>=1.16.1" \
             "onnxruntime>=1.10.0"
 
       - name: Install rknn-toolkit2
         run: |
-          pip install \
+          pip install --no-deps \
             "https://github.com/airockchip/rknn-toolkit2/raw/master/rknn-toolkit2/packages/x86_64/rknn_toolkit2-2.3.2-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
 
       - name: Install ultralytics (ONNX export)

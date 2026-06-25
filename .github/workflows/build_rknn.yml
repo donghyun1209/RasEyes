@@ -21,14 +21,23 @@ jobs:
         with:
           python-version: '3.10'
 
+      - name: Install PyTorch (CPU-only)
+        run: |
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
       - name: Install rknn-toolkit2 dependencies
         run: |
           pip install \
             "protobuf>=4.21.6,<=4.25.4" \
-            psutil "ruamel.yaml>=0.17.21" "scipy>=1.9.3" "tqdm>=4.64.1" \
-            "fast-histogram>=0.11" "numpy<=1.26.4" \
-            "onnx>=1.16.1" "onnxruntime>=1.10.0" \
-            "torch>=1.10.1,<=2.4.0" --index-url https://download.pytorch.org/whl/cpu
+            psutil \
+            "ruamel.yaml>=0.17.21" \
+            "scipy>=1.9.3" \
+            "tqdm>=4.64.1" \
+            "opencv-python-headless>=4.5.5.64" \
+            "fast-histogram>=0.11" \
+            "numpy<=1.26.4" \
+            "onnx>=1.16.1" \
+            "onnxruntime>=1.10.0"
 
       - name: Install rknn-toolkit2
         run: |

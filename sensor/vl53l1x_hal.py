@@ -51,7 +51,7 @@ class VL53L1XHAL(BaseToFHAL):
         # argtypes·restype이 32비트 기준으로 설정되어 64비트에서 segfault 발생
         from ctypes import c_int, c_uint, c_uint16, c_void_p
 
-        lib = VL53L1X.VL53L1X._TOF_LIBRARY
+        lib = VL53L1X._TOF_LIBRARY  # _TOF_LIBRARY is a module-level variable, not a class attr
         lib.initialise.restype = c_void_p
         lib.startRanging.argtypes = [c_void_p, c_int]
         lib.stopRanging.argtypes = [c_void_p]
@@ -61,12 +61,12 @@ class VL53L1XHAL(BaseToFHAL):
         lib.setInterMeasurementPeriodMilliSeconds.argtypes = [c_void_p, c_uint]
 
         try:
-            self._tof = VL53L1X.VL53L1X(i2c_port=self._i2c_port)
+            self._tof = VL53L1X.VL53L1X(i2c_bus=self._i2c_port)
             self._tof.open()
             self._tof.set_timing(
                 self._timing_budget_us, self._inter_measurement_ms
             )
-            self._tof.start_ranging(0)  # 0 = 최대 거리 모드
+            self._tof.start_ranging(3)  # 3 = LONG (최대 거리, 연속 측정 모드)
         except Exception as exc:
             self._tof = None
             raise RuntimeError(f"VL53L1X 초기화 실패: {exc}") from exc

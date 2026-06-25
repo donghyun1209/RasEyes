@@ -52,17 +52,24 @@ def _build_vision(use_mock: bool, use_hw: bool) -> VisionInterface:
         return MockVision()
     if use_hw:
         try:
+            from rknnlite.api import RKNNLite  # noqa: F401 — package availability check
             from vision.rknn_detector import RknnDetector
             from vision.csi_camera_hal import CSICameraHAL
             return RknnDetector(camera=CSICameraHAL())
         except (ImportError, RuntimeError) as exc:
             logger.warning("RKNN 초기화 실패, YoloDetector(cpu) fallback: %s", exc)
         try:
+            import ultralytics  # noqa: F401 — package availability check
             from vision.csi_camera_hal import CSICameraHAL
             return YoloDetector(camera=CSICameraHAL(), device="cpu")
         except Exception as exc:
-            logger.warning("CSICameraHAL 초기화 실패, OpenCVCamera fallback: %s", exc)
-    return YoloDetector(camera=OpenCVCamera())
+            logger.warning("CSICameraHAL/YoloDetector 초기화 실패, OpenCVCamera fallback: %s", exc)
+    try:
+        import ultralytics  # noqa: F401 — package availability check
+        return YoloDetector(camera=OpenCVCamera())
+    except ImportError as exc:
+        logger.warning("ultralytics 미설치, MockVision fallback (ToF+오디오는 정상 동작): %s", exc)
+        return MockVision()
 
 
 def _build_sensor(use_mock: bool, use_hw: bool) -> BaseToFHAL:
@@ -82,9 +89,10 @@ def _build_audio(use_mock: bool, use_hw: bool) -> BaseAudioHAL:
     if use_mock or not use_hw:
         return MockAudio()
     try:
+        import sounddevice  # noqa: F401 — OSError if PortAudio lib missing
         from audio.jack_hal import JackAudioHAL
         return JackAudioHAL()
-    except (ImportError, RuntimeError) as exc:
+    except (ImportError, RuntimeError, OSError) as exc:
         logger.warning("JackAudioHAL 초기화 실패, MockAudio fallback: %s", exc)
         return MockAudio()
 

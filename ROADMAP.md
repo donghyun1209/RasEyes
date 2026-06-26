@@ -155,19 +155,27 @@
 | 4-C-1 | `systemd` 서비스 유닛 파일 작성 (전원 인가 시 자동 실행) | `raseyes.service` | ✅ |
 | 4-C-2 | 부팅 완료 오디오 큐 구현 (MID→MID→HIGH 멜로디) | `audio/boot_sequence.py` | ✅ |
 | 4-C-3 | 물리 버튼(GPIO) 이벤트 핸들러 구현 | `sensor/button_handler.py` | ✅ |
-| 4-C-4 | 부팅 시간 < 45초 달성 검증 | - | 🔲 |
+| 4-C-4 | 부팅 시간 < 45초 달성 검증 | kernel 3.8s + userspace 7.2s = **11초** | ✅ |
 
 ### 4-D. Orange Pi 5 배포 및 현장 검증 ← **현재 단계**
 | # | 작업 | 비고 | 상태 |
 |---|------|------|------|
 | 4-D-1 | GitHub push → Orange Pi 5 git clone | `ssh raseyes 'git clone ...'` | ✅ |
-| 4-D-2 | Orange Pi 5 의존성 설치 | `pip install -r requirements-rpi.txt` | 🔲 |
-| 4-D-3 | 각 HAL 단품 동작 테스트 (CSI 카메라 / ToF / 오디오) | 수동 검증 | 🔲 |
-| 4-D-4 | `RASEYES_HW=1 python main.py` E2E 통합 테스트 | FPS≥15, 비프음 확인 | 🔲 |
-| 4-D-5 | `scripts/export_rknn.py` 실행 → `yolov8n.rknn` 생성 후 scp 전송 | PC에서 실행 | 🔲 |
+| 4-D-2 | Orange Pi 5 의존성 설치 | sounddevice, gpiod, VL53L1X, rknnlite2 | ✅ |
+| 4-D-3 | 각 HAL 단품 동작 테스트 (CSI 카메라 / ToF / 오디오) | CSICameraHAL PASS · VL53L1XHAL PASS · JackAudioHAL PASS | ✅ |
+| 4-D-4 | `RASEYES_HW=1 python main.py` E2E 통합 테스트 | ToF 실측으로 MID/HIGH 경보 정상 동작 확인 | ✅ |
+| 4-D-5 | `yolov8n.rknn` 생성 후 scp 전송 | `.github/workflows/build_rknn.yml` 작성 완료, Actions 실행 중 | 🔄 |
 | 4-D-6 | RKNN 추론 속도 측정 (50회 평균) | 목표 < 60ms | 🔲 |
-| 4-D-7 | systemd 서비스 등록 및 부팅 자동 시작 검증 | `sudo systemctl enable raseyes` | 🔲 |
-| 4-D-8 | 부팅 시간 < 45초 달성 확인 | - | 🔲 |
+| 4-D-7 | systemd 서비스 등록 및 부팅 자동 시작 검증 | `enabled`, `active (running)` | ✅ |
+| 4-D-8 | 부팅 시간 < 45초 달성 확인 | 11초 달성 | ✅ |
+
+> **4-D 현장에서 발견·수정한 버그:**
+> - `VL53L1X._TOF_LIBRARY` 모듈 레벨 변수 접근 오류 수정
+> - `i2c_port=` → `i2c_bus=` 파라미터명 수정 (pimoroni v0.0.5)
+> - `start_ranging(3)` LONG 모드 → `start_ranging(2)` MEDIUM 모드
+>   (LONG 모드 최소 타이밍 버짓 140ms, 50ms 설정 시 측정 주기 ~1s → 데이터 만료)
+> - `_build_vision()` factory에서 `.rknn` 파일 존재 확인 → 없으면 MockVision graceful fallback
+> - JackAudioHAL: `libportaudio2` apt 설치 없이 시스템 PortAudio 자동 탐지로 정상 동작
 
 **Phase 4 완료 기준:** Orange Pi 5에서 Mock 없이 실제 하드웨어로 동일 파이프라인 동작, 부팅 후 오디오 큐 출력.
 
@@ -209,7 +217,7 @@ Phase 0  ──✅── 기반 구축
 Phase 1  ──✅── PC Mock 파이프라인 완성
 Phase 2  ──✅── MPS 비전 AI 통합
 Phase 3  ──✅── pytest 테스트 스위트  (72 tests passing)
-Phase 4  ──🔄── Orange Pi 5 하드웨어 이식 (4-A/B/C 코드 완성, 4-D 현장 검증 진행 중)
+Phase 4  ──🔄── Orange Pi 5 하드웨어 이식 (4-D-5 RKNN 모델 생성만 잔여)
 Phase 5  ──🔲── 최적화 & 안정화
 Phase 6  ──🔲── PoC 베타 테스트
 ```

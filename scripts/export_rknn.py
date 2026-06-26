@@ -71,7 +71,7 @@ def _convert_rknn(
         mean_values=[[0, 0, 0]],
         std_values=[[255, 255, 255]],
         target_platform=_TARGET_PLATFORM,
-        quantization_algorithm="normal",
+        quantized_algorithm="normal",
     )
 
     logger.info("ONNX 로드: %s", onnx_path)

@@ -54,21 +54,19 @@ jobs:
       - name: Download YOLOv8n weights
         run: python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
 
-      - name: Download COCO calibration images (INT8 양자화용)
+      - name: Download COCO128 calibration images (INT8 양자화용, ~7MB)
         if: ${{ github.event.inputs.quant == 'true' }}
         run: |
-          pip install pycocotools
           python - <<'EOF'
-          import urllib.request, zipfile, os, random, pathlib
-          url = "http://images.cocodataset.org/zips/val2017.zip"
-          print("COCO val2017 다운로드 중 (약 800MB)...")
-          urllib.request.urlretrieve(url, "val2017.zip")
-          with zipfile.ZipFile("val2017.zip") as z:
-              names = [n for n in z.namelist() if n.endswith(".jpg")]
-              chosen = random.sample(names, min(100, len(names)))
-              z.extractall(members=chosen)
-          pathlib.Path("dataset.txt").write_text("\n".join(chosen))
-          print(f"캘리브레이션 이미지 {len(chosen)}장 준비 완료")
+          import urllib.request, zipfile, pathlib
+          url = "https://ultralytics.com/assets/coco128.zip"
+          print("COCO128 다운로드 중 (~7MB)...")
+          urllib.request.urlretrieve(url, "coco128.zip")
+          with zipfile.ZipFile("coco128.zip") as z:
+              z.extractall()
+          imgs = sorted(pathlib.Path("coco128/images/train2017").glob("*.jpg"))
+          pathlib.Path("dataset.txt").write_text("\n".join(str(p) for p in imgs))
+          print(f"캘리브레이션 이미지 {len(imgs)}장 준비 완료")
           EOF
 
       - name: Convert to RKNN

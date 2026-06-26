@@ -100,9 +100,10 @@ class RknnDetector(VisionInterface):
         frame = self._camera.read_frame()
         self._orig_h, self._orig_w = frame.shape[:2]
 
-        # 전처리: BGR→RGB, 640×640 리사이즈
+        # 전처리: BGR→RGB, 640×640 리사이즈, 배치 차원 추가
         img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         img = cv2.resize(img, (_RKNN_INPUT_SIZE, _RKNN_INPUT_SIZE))
+        img = np.expand_dims(img, axis=0)  # (H,W,C) → (1,H,W,C)
 
         outputs = self._rknn.inference(inputs=[img])
         detections = self._postprocess(outputs)

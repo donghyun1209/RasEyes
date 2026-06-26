@@ -40,8 +40,8 @@ jobs:
             "scipy>=1.9.3" \
             "tqdm>=4.64.1" \
             "opencv-python-headless>=4.5.5.64" \
-            "onnx>=1.16.1" \
-            "onnxruntime>=1.10.0"
+            "onnx>=1.14.0,<=1.16.0" \
+            "onnxruntime>=1.10.0,<1.20.0"
 
       - name: Install rknn-toolkit2
         run: |

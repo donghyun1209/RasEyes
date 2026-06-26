@@ -71,6 +71,11 @@ class VL53L1XHAL(BaseToFHAL):
             )
             self._tof.start_ranging(2)  # 2 = MEDIUM (최대 3m, 33ms+ 타이밍 버짓 지원 → 50ms OK)
         except Exception as exc:
+            if self._tof is not None:
+                try:
+                    self._tof.close()
+                except Exception:
+                    pass
             self._tof = None
             raise RuntimeError(f"VL53L1X 초기화 실패: {exc}") from exc
 

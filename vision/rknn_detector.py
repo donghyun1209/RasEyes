@@ -55,7 +55,7 @@ class RknnDetector(VisionInterface):
             ImportError: rknnlite2 패키지 미설치 시.
             RuntimeError: 모델 로드 또는 런타임 초기화 실패 시.
         """
-        if self._started:
+        if self._started or self._rknn is not None:
             self.stop()
 
         try:
@@ -194,10 +194,16 @@ class RknnDetector(VisionInterface):
 
     def stop(self) -> None:
         """RKNN 런타임과 카메라 리소스를 해제한다."""
-        if self._started:
+        if self._started or self._rknn is not None:
             if self._rknn is not None:
-                self._rknn.release()
+                try:
+                    self._rknn.release()
+                except Exception as exc:
+                    logger.error("RKNN 런타임 해제 중 오류 발생: %s", exc)
                 self._rknn = None
-            self._camera.stop()
+            try:
+                self._camera.stop()
+            except Exception as exc:
+                logger.error("카메라 정지 중 오류 발생: %s", exc)
             self._started = False
             logger.info("RknnDetector 종료")

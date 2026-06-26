@@ -63,20 +63,21 @@ def run_benchmark(
 
     camera = MockCamera(source=source)
     detector = RknnDetector(camera=camera, model_path=model_path)
-    detector.start()
+    try:
+        detector.start()
 
-    # 워밍업 (NPU 런타임 초기 지연 제거)
-    for _ in range(config.BENCHMARK_WARMUP_FRAMES):
-        detector.get_frame_detections()
+        # 워밍업 (NPU 런타임 초기 지연 제거)
+        for _ in range(config.BENCHMARK_WARMUP_FRAMES):
+            detector.get_frame_detections()
 
-    # 측정
-    latencies: list[float] = []
-    for _ in range(frames):
-        t0 = time.perf_counter()
-        detector.get_frame_detections()
-        latencies.append((time.perf_counter() - t0) * 1000.0)
-
-    detector.stop()
+        # 측정
+        latencies: list[float] = []
+        for _ in range(frames):
+            t0 = time.perf_counter()
+            detector.get_frame_detections()
+            latencies.append((time.perf_counter() - t0) * 1000.0)
+    finally:
+        detector.stop()
     assert detector._rknn is None, "stop() 후 RKNN 런타임이 해제되지 않았습니다."
 
     arr = np.array(latencies)

@@ -394,12 +394,15 @@ class RasEyesApp:
                     cpu_temp = round(_read_cpu_temp(), 1)
                 else:
                     cpu_temp = 0.0
-                self._csv_logger.write_row(
-                    tof_distance_cm=result.distance_cm,
-                    alert_triggered=result.risk_level != RiskLevel.NONE,
-                    fps=max(0, round(actual_fps)),
-                    cpu_temp=cpu_temp,
-                )
+                try:
+                    self._csv_logger.write_row(
+                        tof_distance_cm=result.distance_cm,
+                        alert_triggered=result.risk_level != RiskLevel.NONE,
+                        fps=max(0, round(actual_fps)),
+                        cpu_temp=cpu_temp,
+                    )
+                except Exception as exc:
+                    logger.error("CSV 로그 기록 실패: %s", exc)
                 last_log_time = now
 
             elapsed = time.monotonic() - loop_start

@@ -23,6 +23,8 @@ import config
 class TestResult:
     """단품 테스트 결과."""
 
+    __test__ = False
+
     name: str
     passed: bool
     detail: str

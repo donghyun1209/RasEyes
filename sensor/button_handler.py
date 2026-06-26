@@ -62,16 +62,20 @@ class ButtonHandler:
 
     def _poll_loop(self, on_press: Callable[[], None], gpiod) -> None:
         """버튼 상태를 폴링하며 눌림을 감지한다."""
+        chip = None
+        line = None
         try:
-            chip = gpiod.Chip(self._chip_name)
-            line = chip.get_line(self._pin)
-            line.request(consumer="raseyes-button", type=gpiod.LINE_REQ_DIR_IN)
-        except Exception as exc:
-            logger.error("ButtonHandler GPIO 초기화 실패: %s", exc)
-            return
+            try:
+                chip = gpiod.Chip(self._chip_name)
+                line = chip.get_line(self._pin)
+                line.request(consumer="raseyes-button", type=gpiod.LINE_REQ_DIR_IN)
+            except Exception as exc:
+                logger.error("ButtonHandler GPIO 초기화 실패: %s", exc)
+                if chip is not None:
+                    chip.close()
+                return
 
-        prev_value = 1  # 풀업 저항 기본값 HIGH
-        try:
+            prev_value = 1  # 풀업 저항 기본값 HIGH
             while not self._stop_event.is_set():
                 value = line.get_value()
                 if prev_value == 1 and value == 0:  # falling edge (눌림)
@@ -85,8 +89,10 @@ class ButtonHandler:
                 prev_value = value
                 time.sleep(_POLL_INTERVAL_SEC)
         finally:
-            line.release()
-            chip.close()
+            if line is not None:
+                line.release()
+            if chip is not None:
+                chip.close()
 
     def stop(self) -> None:
         """폴링 스레드를 중단한다."""

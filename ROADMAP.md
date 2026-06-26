@@ -179,6 +179,12 @@
 
 **Phase 4 완료 기준:** Orange Pi 5에서 Mock 없이 실제 하드웨어로 동일 파이프라인 동작, 부팅 후 오디오 큐 출력.
 
+> **Phase 4 코드 리뷰 핫픽스 (2026-06-26):**
+> - `pytest.ini` 추가 (`testpaths = tests`) — `scripts/test_device.py` pytest 수집 에러 근본 해결
+> - `sensor/button_handler.py` — `_poll_loop` GPIO 초기화 실패 시 Chip 리소스 누수 수정
+> - `sensor/vl53l1x_hal.py` — `start()` 예외 시 open된 I2C connection 누수 수정
+> - `main.py` — CSV `write_row()` try-except 보호로 로깅 에러가 메인 루프 크래시 방지
+
 ---
 
 ## Phase 5 · 시스템 최적화 및 안정화

@@ -57,17 +57,10 @@ jobs:
       - name: Download COCO128 calibration images (INT8 양자화용, ~7MB)
         if: ${{ github.event.inputs.quant == 'true' }}
         run: |
-          python - <<'EOF'
-          import urllib.request, zipfile, pathlib
-          url = "https://ultralytics.com/assets/coco128.zip"
-          print("COCO128 다운로드 중 (~7MB)...")
-          urllib.request.urlretrieve(url, "coco128.zip")
-          with zipfile.ZipFile("coco128.zip") as z:
-              z.extractall()
-          imgs = sorted(pathlib.Path("coco128/images/train2017").glob("*.jpg"))
-          pathlib.Path("dataset.txt").write_text("\n".join(str(p) for p in imgs))
-          print(f"캘리브레이션 이미지 {len(imgs)}장 준비 완료")
-          EOF
+          wget -q --show-progress "https://ultralytics.com/assets/coco128.zip" -O coco128.zip
+          unzip -q coco128.zip
+          find coco128/images -name "*.jpg" | sort > dataset.txt
+          echo "캘리브레이션 이미지 $(wc -l < dataset.txt)장 준비 완료"
 
       - name: Convert to RKNN
         run: |

@@ -145,8 +145,8 @@
 ### 4-B. YOLOv8 → RKNN 변환 및 NPU 최적화
 | # | 작업 | 비고 | 상태 |
 |---|------|------|------|
-| 4-B-1 | YOLOv8 Nano ONNX → `.rknn` INT8 변환 (PC에서 rknn-toolkit2 사용) | `scripts/export_rknn.py` | ✅ (스크립트 완성, 실행 대기) |
-| 4-B-2 | Orange Pi 5에서 rknnlite2 추론 속도 측정 및 튜닝 | 목표: < 60ms | 🔲 |
+| 4-B-1 | YOLOv8 Nano ONNX → `.rknn` INT8 변환 (PC에서 rknn-toolkit2 사용) | `scripts/export_rknn.py` | ✅ |
+| 4-B-2 | Orange Pi 5에서 rknnlite2 추론 속도 측정 및 튜닝 | **평균 27.5ms, 36.3 FPS** (INT8, NPU_CORE_0_1) | ✅ |
 | 4-B-3 | CPU 추론 fallback 유지 (rknnlite2 초기화 실패 시 PyTorch CPU) | `vision/rknn_detector.py` | ✅ |
 
 ### 4-C. 시스템 서비스 구성
@@ -164,8 +164,8 @@
 | 4-D-2 | Orange Pi 5 의존성 설치 | sounddevice, gpiod, VL53L1X, rknnlite2 | ✅ |
 | 4-D-3 | 각 HAL 단품 동작 테스트 (CSI 카메라 / ToF / 오디오) | CSICameraHAL PASS · VL53L1XHAL PASS · JackAudioHAL PASS | ✅ |
 | 4-D-4 | `RASEYES_HW=1 python main.py` E2E 통합 테스트 | ToF 실측으로 MID/HIGH 경보 정상 동작 확인 | ✅ |
-| 4-D-5 | `yolov8n.rknn` 생성 후 scp 전송 | `.github/workflows/build_rknn.yml` 작성 완료, Actions 실행 중 | 🔄 |
-| 4-D-6 | RKNN 추론 속도 측정 (50회 평균) | 목표 < 60ms | 🔲 |
+| 4-D-5 | `yolov8n.rknn` 생성 후 scp 전송 | INT8 양자화(COCO128), GitHub Actions → scp | ✅ |
+| 4-D-6 | RKNN 추론 속도 측정 (50회 평균) | **평균 27.5ms · P95 29.9ms · 36.3 FPS** ✓ | ✅ |
 | 4-D-7 | systemd 서비스 등록 및 부팅 자동 시작 검증 | `enabled`, `active (running)` | ✅ |
 | 4-D-8 | 부팅 시간 < 45초 달성 확인 | 11초 달성 | ✅ |
 
@@ -217,7 +217,7 @@ Phase 0  ──✅── 기반 구축
 Phase 1  ──✅── PC Mock 파이프라인 완성
 Phase 2  ──✅── MPS 비전 AI 통합
 Phase 3  ──✅── pytest 테스트 스위트  (72 tests passing)
-Phase 4  ──🔄── Orange Pi 5 하드웨어 이식 (4-D-5 RKNN 모델 생성만 잔여)
+Phase 4  ──✅── Orange Pi 5 하드웨어 이식 완료 (INT8 NPU 27.5ms · 36.3 FPS)
 Phase 5  ──🔲── 최적화 & 안정화
 Phase 6  ──🔲── PoC 베타 테스트
 ```

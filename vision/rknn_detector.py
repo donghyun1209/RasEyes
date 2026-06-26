@@ -73,7 +73,7 @@ class RknnDetector(VisionInterface):
                 f"RKNN 모델 로드 실패 (ret={ret}): {self._model_path}"
             )
 
-        ret = self._rknn.init_runtime()
+        ret = self._rknn.init_runtime(core_mask=RKNNLite.NPU_CORE_0_1)
         if ret != 0:
             self._rknn.release()
             self._rknn = None

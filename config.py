@@ -56,3 +56,22 @@ AUDIO_SAMPLE_RATE: int = 44100
 AUDIO_HIGH_FREQ_HZ: float = 2000.0             # HIGH risk 비프음 주파수
 AUDIO_MID_FREQ_HZ: float = 1000.0              # MID risk 비프음 주파수
 AUDIO_BEEP_DURATION_MS: int = 80               # 비프음 지속 시간
+
+# === Phase 5 — Optimization & Stabilization ===
+# 5-1: E2E Latency
+LATENCY_WARN_THRESHOLD_MS: float = 400.0       # E2E 400ms 초과 시 경고
+
+# 5-2: Thermal Graceful Degradation
+THERMAL_THROTTLE_TEMP_C: float = 80.0          # 스로틀 트리거 CPU 온도 (°C)
+THERMAL_RECOVERY_TEMP_C: float = 75.0          # 스로틀 해제 복구 임계값 (히스테리시스 5°C)
+THERMAL_THROTTLE_FPS: int = 5                  # 스로틀 시 목표 FPS
+
+# 5-3: Camera Occlusion Detection
+CAMERA_OCCLUSION_CHANGE_THRESH: float = 3.0    # 프레임 간 평균 픽셀 변화량 임계값
+CAMERA_OCCLUSION_FRAMES: int = 15              # 연속 프레임 수 (~1초 @ 15FPS)
+CAMERA_OCCLUSION_COOLDOWN_SEC: float = 5.0     # 가림 경고 재발 방지 쿨다운 (초)
+
+# 5-4: Battery Warning
+BATTERY_LOW_THRESHOLD_PCT: int = 20            # 배터리 잔량 경고 임계값 (%)
+BATTERY_CHECK_INTERVAL_SEC: float = 30.0       # 배터리 확인 주기 (초)
+BATTERY_SYSFS_PATH: str = "/sys/class/power_supply/battery/capacity"

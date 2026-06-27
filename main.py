@@ -12,9 +12,12 @@ import logging
 import os
 import queue
 import random
+import signal
 import threading
 import time
 from typing import Callable, List, Optional, Tuple
+
+import numpy as np
 
 import config
 from audio.beep_controller import BeepController
@@ -22,6 +25,7 @@ from audio.hal import BaseAudioHAL
 from audio.mock import MockAudio
 from fusion.engine import FusionEngine, RiskLevel
 from logs.logger import CsvLogger
+from sensor.button_handler import ButtonHandler
 from sensor.hal import BaseToFHAL
 from sensor.mock import MockToFSensor
 from vision.detector import YoloDetector
@@ -44,6 +48,15 @@ def _read_cpu_temp() -> float:
             return int(f.read().strip()) / 1000.0
     except OSError:
         return 0.0
+
+
+def _read_battery_percent() -> Optional[int]:
+    """배터리 잔량(%)을 반환한다. sysfs 경로가 없으면 None 반환."""
+    try:
+        with open(config.BATTERY_SYSFS_PATH) as f:
+            return int(f.read().strip())
+    except OSError:
+        return None
 
 
 def _build_vision(use_mock: bool, use_hw: bool) -> VisionInterface:
@@ -116,6 +129,7 @@ def _vision_worker(
     stop_event: threading.Event,
     out_q: "queue.Queue[Tuple[float, object, List[DetectionResult]]]",
     heartbeat: List[float],
+    throttle_event: Optional[threading.Event] = None,
 ) -> None:
     """비전 캡처+탐지를 별도 스레드에서 실행하고 결과를 큐에 넣는다.
 
@@ -125,6 +139,7 @@ def _vision_worker(
         out_q: (timestamp, frame, detections) 튜플을 담는 출력 큐.
         heartbeat: heartbeat[0]을 매 이터레이션마다 현재 시각으로 갱신한다.
                    메인 루프의 Watchdog이 이 값을 확인하여 스레드 스톨을 감지한다.
+        throttle_event: 세트되면 추론 후 추가 슬립으로 FPS를 낮춘다 (발열 제어용).
     """
     consecutive_failures = 0
     while not stop_event.is_set():
@@ -133,6 +148,8 @@ def _vision_worker(
             frame, detections = vision.get_frame_detections()
             _put_latest(out_q, (time.monotonic(), frame, detections))
             consecutive_failures = 0
+            if throttle_event is not None and throttle_event.is_set():
+                time.sleep(1.0 / config.THERMAL_THROTTLE_FPS)
         except Exception as exc:
             consecutive_failures += 1
             if consecutive_failures > config.REINIT_MAX_RETRIES:
@@ -223,10 +240,14 @@ class RasEyesApp:
         self._vision_q: queue.Queue = queue.Queue(maxsize=_Q_SIZE)
         self._sensor_q: queue.Queue = queue.Queue(maxsize=_Q_SIZE)
         self._stop_event = threading.Event()
+        self._thermal_event = threading.Event()
         self._vision_heartbeat: List[float] = [time.monotonic()]
 
         self._v_thread: Optional[threading.Thread] = None
         self._s_thread: Optional[threading.Thread] = None
+
+        self._button_handler: Optional[ButtonHandler] = None
+        self._mute_active: bool = False
 
     def start(self) -> None:
         """모든 컴포넌트와 워커 스레드를 시작한다."""
@@ -238,7 +259,7 @@ class RasEyesApp:
         self._vision_heartbeat[0] = time.monotonic()
         self._v_thread = threading.Thread(
             target=_vision_worker,
-            args=(self._vision, self._stop_event, self._vision_q, self._vision_heartbeat),
+            args=(self._vision, self._stop_event, self._vision_q, self._vision_heartbeat, self._thermal_event),
             daemon=True,
             name="vision-worker",
         )
@@ -250,12 +271,28 @@ class RasEyesApp:
         )
         self._v_thread.start()
         self._s_thread.start()
+
+        if self._use_hw:
+            try:
+                self._button_handler = ButtonHandler()
+                self._button_handler.start(self._toggle_mute)
+            except RuntimeError as exc:
+                logger.warning("ButtonHandler 초기화 실패 (gpiod 미설치?): %s", exc)
+                self._button_handler = None
+
         mode = "Mock" if self._use_mock else "YoloDetector"
         logger.info("RasEyes 시작 (%s 모드, 병렬 스레드)", mode)
+
+    def _toggle_mute(self) -> None:
+        """물리 버튼 누름 시 오디오 음소거 온/오프 전환."""
+        self._mute_active = not self._mute_active
+        logger.info("버튼 누름: 오디오 %s", "음소거" if self._mute_active else "음소거 해제")
 
     def stop(self) -> None:
         """모든 워커 스레드를 중단하고 컴포넌트를 정리한다."""
         self._stop_event.set()
+        if self._button_handler is not None:
+            self._button_handler.stop()
         if self._v_thread:
             self._v_thread.join(timeout=2.0)
         if self._s_thread:
@@ -276,6 +313,12 @@ class RasEyesApp:
 
     def run(self) -> None:
         """start() → 메인 루프 → stop() 전체 수명 주기를 실행한다."""
+        def _on_sigterm(signum, frame):
+            logger.info("종료 신호 수신 (SIGTERM)")
+            self._stop_event.set()
+
+        signal.signal(signal.SIGTERM, _on_sigterm)
+
         self.start()
         try:
             self._run_loop()
@@ -303,7 +346,22 @@ class RasEyesApp:
         last_log_time = time.monotonic()
         frame_interval = 1.0 / config.TARGET_FPS
 
-        while True:
+        # 5-1: E2E 레이턴시 추적
+        e2e_ms_ema: float = 0.0
+        current_vision_ts: Optional[float] = None
+
+        # 5-2: 발열 스로틀링 상태
+        thermal_throttle_active: bool = False
+
+        # 5-3: 카메라 가림 감지
+        _prev_frame: Optional[object] = None
+        _occlusion_counter: int = 0
+        _last_occlusion_alert_time: float = 0.0
+
+        # 5-4: 배터리 잔량 확인
+        last_battery_check_time: float = 0.0
+
+        while not self._stop_event.is_set():
             loop_start = time.monotonic()
 
             # 실측 FPS 계산 (EMA 적용)
@@ -315,7 +373,8 @@ class RasEyesApp:
             # 비전 큐: 남은 프레임 예산만큼 블로킹 대기
             _vision_wait = max(0.0, frame_interval - (time.monotonic() - loop_start))
             try:
-                vision_ts, _, last_detections = self._vision_q.get(timeout=_vision_wait)
+                vision_ts, last_frame, last_detections = self._vision_q.get(timeout=_vision_wait)
+                current_vision_ts = vision_ts
                 if prev_vision_ts is not None:
                     v_iter = vision_ts - prev_vision_ts
                     if v_iter > 0:
@@ -325,6 +384,21 @@ class RasEyesApp:
                         )
                 prev_vision_ts = vision_ts
                 last_vision_ts = vision_ts
+
+                # 5-3: 카메라 가림 감지 — 프레임 간 픽셀 변화량 분석
+                if (
+                    not self._use_mock
+                    and last_frame is not None
+                    and _prev_frame is not None
+                ):
+                    delta = float(
+                        np.mean(np.abs(last_frame.astype(float) - _prev_frame.astype(float)))
+                    )
+                    if delta < config.CAMERA_OCCLUSION_CHANGE_THRESH:
+                        _occlusion_counter += 1
+                    else:
+                        _occlusion_counter = 0
+                _prev_frame = last_frame
             except queue.Empty:
                 pass
             try:
@@ -383,8 +457,38 @@ class RasEyesApp:
                 min_confidence=self._vision.conf_threshold,
             )
 
-            if self._beep.should_beep(result.risk_level):
-                self._audio.play_alert(result.risk_level)
+            # 시스템 경고(배터리 등)와 퓨전 결과를 병합해 단일 오디오 채널로 직렬화
+            pending_system = self._beep.pop_system_alert()
+            effective_risk = (
+                pending_system
+                if pending_system is not None and pending_system.value > result.risk_level.value
+                else result.risk_level
+            )
+            if self._beep.should_beep(effective_risk) and not self._mute_active:
+                self._audio.play_alert(effective_risk)
+
+            # 5-1: E2E 레이턴시 측정 (퓨전+오디오 결정 완료 시점, 신규 프레임 수신 시에만 갱신)
+            if current_vision_ts is not None:
+                e2e_ms = (time.monotonic() - current_vision_ts) * 1000.0
+                if e2e_ms_ema == 0.0:
+                    e2e_ms_ema = e2e_ms
+                else:
+                    e2e_ms_ema = (1 - _FPS_EMA_ALPHA) * e2e_ms_ema + _FPS_EMA_ALPHA * e2e_ms
+                if e2e_ms_ema > config.LATENCY_WARN_THRESHOLD_MS:
+                    logger.warning("E2E 레이턴시 초과: %.1fms (임계값 %.0fms)", e2e_ms_ema, config.LATENCY_WARN_THRESHOLD_MS)
+                current_vision_ts = None  # 신규 프레임이 들어올 때만 재계산
+
+            # 5-3: 카메라 가림 경고 발생
+            now = time.monotonic()
+            if _occlusion_counter >= config.CAMERA_OCCLUSION_FRAMES:
+                if now - _last_occlusion_alert_time > config.CAMERA_OCCLUSION_COOLDOWN_SEC:
+                    logger.warning(
+                        "카메라 가림 감지 (%.0f 프레임 연속 픽셀 변화량 < %.1f)",
+                        config.CAMERA_OCCLUSION_FRAMES,
+                        config.CAMERA_OCCLUSION_CHANGE_THRESH,
+                    )
+                    self._audio.play_alert(RiskLevel.HIGH)
+                    _last_occlusion_alert_time = now
 
             now = time.monotonic()
             if now - last_log_time >= config.LOG_INTERVAL_SEC:
@@ -394,16 +498,47 @@ class RasEyesApp:
                     cpu_temp = round(_read_cpu_temp(), 1)
                 else:
                     cpu_temp = 0.0
+
+                # 5-2: CPU 온도 기반 발열 스로틀링
+                if self._use_hw:
+                    if cpu_temp > config.THERMAL_THROTTLE_TEMP_C and not thermal_throttle_active:
+                        logger.warning(
+                            "CPU 온도 %.1f°C 초과, FPS 스로틀링 활성화 (%d FPS)",
+                            cpu_temp,
+                            config.THERMAL_THROTTLE_FPS,
+                        )
+                        self._thermal_event.set()
+                        frame_interval = 1.0 / config.THERMAL_THROTTLE_FPS
+                        thermal_throttle_active = True
+                    elif cpu_temp <= config.THERMAL_RECOVERY_TEMP_C and thermal_throttle_active:
+                        logger.info(
+                            "CPU 온도 %.1f°C 복귀, 정상 FPS 복원 (%d FPS)",
+                            cpu_temp,
+                            config.TARGET_FPS,
+                        )
+                        self._thermal_event.clear()
+                        frame_interval = 1.0 / config.TARGET_FPS
+                        thermal_throttle_active = False
+
                 try:
                     self._csv_logger.write_row(
                         tof_distance_cm=result.distance_cm,
                         alert_triggered=result.risk_level != RiskLevel.NONE,
                         fps=max(0, round(actual_fps)),
                         cpu_temp=cpu_temp,
+                        latency_ms=round(e2e_ms_ema, 1),
                     )
                 except Exception as exc:
                     logger.error("CSV 로그 기록 실패: %s", exc)
                 last_log_time = now
+
+                # 5-4: 배터리 잔량 확인 (30초 주기)
+                if now - last_battery_check_time >= config.BATTERY_CHECK_INTERVAL_SEC:
+                    pct = _read_battery_percent()
+                    if pct is not None and pct < config.BATTERY_LOW_THRESHOLD_PCT:
+                        logger.warning("배터리 잔량 부족: %d%%", pct)
+                        self._beep.request_system_alert(RiskLevel.MID)
+                    last_battery_check_time = now
 
             elapsed = time.monotonic() - loop_start
             time.sleep(max(0.0, frame_interval - elapsed))

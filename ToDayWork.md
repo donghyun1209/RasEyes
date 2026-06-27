@@ -1,70 +1,82 @@
-# 2026-06-26 작업 기록
+# 2026-06-27 오늘의 작업
 
-## 완료 항목
+## Phase 5 · 시스템 최적화 및 안정화 완료
 
-### Phase 4-D-5 · RKNN 모델 생성 및 전송 ✅
+### 5-1 · E2E Latency 프로파일링
+- `logs/logger.py`: `FIELDNAMES`에 `latency_ms` 컬럼 추가, `write_row()` 파라미터 추가
+- `main.py`: `vision_ts` 기준 EMA 레이턴시 측정 (`_FPS_EMA_ALPHA` 평활화), 400ms 초과 시 경고 로그, CSV 기록
 
-- `tests/benchmark_rknn.py` 신규 작성 — RknnDetector 전용 NPU 벤치마크 (50회 측정, KPI 자동 판정)
-- GitHub Actions `build_rknn.yml` 워크플로우 3차 디버깅·수정
-  - `quantization_algorithm` → `quantized_algorithm` (rknn-toolkit2 v2.x API 변경)
-  - `onnx>=1.16.1` → `onnx>=1.14.0,<=1.16.0` (`onnx.mapping` 1.17+에서 제거됨)
-  - urllib 308 redirect 미처리 → `wget`으로 교체
-  - INT8 캘리브레이션용 COCO128 데이터셋 자동 다운로드 스텝 추가
-- INT8 양자화 모델(`yolov8n.rknn`, 4.8MB) 빌드 완료 → `scp raseyes:~/RasEyes/` 전송
+### 5-2 · Thermal Graceful Degradation
+- `config.py`: `THERMAL_THROTTLE_TEMP_C = 80.0`, `THERMAL_THROTTLE_FPS = 5` 추가
+- `main.py`:
+  - `RasEyesApp`에 `self._thermal_event = threading.Event()` 추가
+  - `_vision_worker()` 시그니처에 `throttle_event: Optional[threading.Event] = None` 추가 (기존 호출 하위 호환 유지)
+  - vision worker: 스로틀 활성화 시 추론 후 `1/THERMAL_THROTTLE_FPS` 슬립
+  - 메인 루프: CSV 기록 주기(1초)마다 CPU 온도 확인 → 80°C 초과 시 event.set() + frame_interval 하향, 복귀 시 자동 원복
 
-### Phase 4-D-6 · RKNN 추론 속도 측정 ✅
+### 5-3 · 카메라 가림 감지
+- `config.py`: `CAMERA_OCCLUSION_CHANGE_THRESH = 3.0`, `CAMERA_OCCLUSION_FRAMES = 15`, `CAMERA_OCCLUSION_COOLDOWN_SEC = 5.0` 추가
+- `main.py`:
+  - `import numpy as np` 추가
+  - 비전 큐에서 프레임 변수 `last_frame` 으로 명시 수신 (기존 `_` → `last_frame`)
+  - 연속 프레임 간 `np.mean(|curr - prev|)` 으로 픽셀 변화량 측정
+  - 15 프레임 연속 변화량 < 3.0 시 HIGH 경보 + 5초 쿨다운
 
-- `vision/rknn_detector.py` 버그 2건 수정
-  - 입력 차원 오류: `(H,W,C)` → `np.expand_dims` → `(1,H,W,C)`
-  - 듀얼 NPU 코어 적용: `init_runtime(core_mask=RKNNLite.NPU_CORE_0_1)`
-- **벤치마크 결과 (서비스 중단, 50회 평균)**
+### 5-4 · 배터리 잔량 경고
+- `config.py`: `BATTERY_LOW_THRESHOLD_PCT = 20`, `BATTERY_CHECK_INTERVAL_SEC = 30.0`, `BATTERY_SYSFS_PATH` 추가
+- `main.py`: `_read_battery_percent()` 함수 신규 추가 (`_read_cpu_temp()`와 동일 패턴), 30초 주기 확인, 20% 미만 시 MID 경보
 
-| 지표 | 수치 | KPI |
-|------|------|-----|
-| 평균 지연 | **27.5 ms** | < 60ms ✅ |
-| 최소 지연 | 25.7 ms | - |
-| 최대 지연 | 30.0 ms | - |
-| P95 지연 | 29.9 ms | - |
-| FPS | **36.3** | ≥ 15 ✅ |
+### 5-5 · 액티브 쿨러 PWM 제어
+- `scripts/pwm_fan_control.py` 신규 생성
+  - `/sys/class/pwm/pwmchip0/pwm0/` sysfs 제어
+  - 온도→듀티 선형 보간: <50°C→20%, 50~70°C→20~80%, ≥80°C→100%
+  - 5초 주기 루프, SIGTERM/SIGINT graceful exit
 
-- FP16 모델(56.7ms, 17.6 FPS) 대비 INT8이 **2.1배 빠름**
-- 주의: systemd `raseyes.service` 실행 중에는 NPU 경합으로 77ms까지 상승 → 실 운영 시 단일 프로세스만 NPU 점유하므로 문제 없음
-
-### ROADMAP 업데이트 ✅
-
-- Phase 4 전 항목 ✅ 완료 처리
-- 마일스톤 요약 `🔄 → ✅` 갱신
-
-### 에이전트(Antigravity) 코드 리뷰 및 핫픽스 ✅
-
-- **NPU 리소스 누수 및 예외 처리 보완 (`vision/rknn_detector.py`):**
-  - `start()` 중 예외 발생 시 NPU(`self._rknn`)가 해제되지 않고 잔존하던 리소스 누수 수정.
-  - `stop()`에 개별 `try-except` 예외 처리를 적용하여 NPU 및 카메라 자원의 강제 해제 보장.
-- **pytest 수집 경고 제거 (`scripts/test_device.py`):**
-  - `TestResult` 클래스가 pytest 테스트 대상 클래스로 오인되어 경고를 유발하던 현상 해결 (`__test__ = False` 추가).
-- **벤치마크 예외 안전성 개선 (`tests/benchmark_rknn.py`):**
-  - 측정 중 중단이 발생하더라도 NPU/카메라 리소스가 확실히 정리되도록 `try...finally` 적용.
-- **에이전트 역할 규칙 업데이트 (`.agents/AGENTS.md`):**
-  - 에이전트 역할을 프로젝트 코드를 직접 수정하지 않고 `feedback.txt`를 통해 코드 리뷰만 수행하는 '코드 리뷰어(Code Reviewer)'로 역할 한정 및 지침 재정의.
-
-### 코드 리뷰 피드백 핫픽스 (feedback.txt Phase 1-4) ✅
-
-- **pytest 수집 에러 근본 해결 (`pytest.ini` 신규 추가):**
-  - `pytest.ini` 파일 생성 — `testpaths = tests` 설정으로 pytest가 `tests/` 디렉터리만 탐색하도록 제한.
-  - `scripts/test_device.py`가 pytest 수집 단계에서 완전히 배제됨.
-- **ButtonHandler Chip 리소스 누수 수정 (`sensor/button_handler.py`):**
-  - `_poll_loop` 재구조화: `chip = None`, `line = None` 초기화 후 중첩 `try`로 감쌈.
-  - 초기화 중 예외 발생 시 이미 열린 `chip`을 명시적으로 닫고 리턴.
-  - `finally` 블록에서 `line`, `chip` 각각 None 체크 후 안전 해제.
-- **VL53L1X 초기화 실패 시 리소스 누수 수정 (`sensor/vl53l1x_hal.py`):**
-  - `start()` 예외 블록에서 `self._tof`가 이미 open된 경우 `close()` 호출 후 None 처리.
-- **메인 루프 CSV 로깅 예외 안전성 보완 (`main.py`):**
-  - `write_row()` 호출을 `try-except`로 감싸 디스크 에러가 메인 루프를 다운시키지 않도록 처리.
-- **pytest 72개 전체 통과 확인 ✅**
+### 테스트
+- `tests/test_phase5.py` 신규 생성 (20개 테스트)
+- **최종 결과: 92 tests passing** (기존 72 + 신규 20)
 
 ---
 
-## 다음 작업 (Phase 5)
+## Phase 5 코드 리뷰 피드백 반영 (feedback.txt)
 
-- E2E Latency 프로파일링 (비전+센서+오디오 전체 파이프라인 500ms 이내 검증)
-- Orange Pi 5 실외 30분 연속 구동 안정성 테스트
+### [#1] E2E 레이턴시 중복 누적 버그 수정 (`main.py`)
+- E2E 레이턴시 계산 블록 직후 `current_vision_ts = None` 리셋 추가
+- 신규 비전 프레임을 수신했을 때만 EMA에 갱신되도록 수정
+
+### [#2] RKNN 클래스 라벨 불일치 수정 (`vision/rknn_detector.py`)
+- COCO 80개 클래스 이름 테이블 `_COCO_CLASSES` 추가
+- `label=str(class_ids[i])` → `label=_COCO_CLASSES[int(class_ids[i])]` 로 변경
+- CPU YoloDetector와 동일하게 문자열 클래스명 반환
+
+### [#3] 발열 스로틀링 히스테리시스 추가 (`config.py`, `main.py`)
+- `config.py`에 `THERMAL_RECOVERY_TEMP_C = 75.0` 추가
+- 진입: 80°C 초과 시 스로틀, 복구: 75°C 이하 시 해제 (5°C 마진)
+- 80°C 경계에서의 채터링/헌팅 현상 방지
+
+### [#4] ButtonHandler 연동 (`main.py`)
+- `RasEyesApp.__init__`에 `_button_handler`, `_mute_active` 필드 추가
+- `_toggle_mute()` 콜백 추가 (버튼 누름 → 오디오 음소거 토글)
+- `start()`: `use_hw` 모드에서 ButtonHandler 초기화, gpiod 미설치 시 graceful 경고
+- `stop()`: ButtonHandler 정지 포함
+
+### [#5] PWM 초기화 순서 수정 (`scripts/pwm_fan_control.py`)
+- `period` 쓰기 전 `duty_cycle = 0` 먼저 기록하여 EINVAL(duty_cycle > period) 방지
+
+### [#6] SIGTERM Graceful Shutdown 추가 (`main.py`)
+- `signal` 모듈 import 추가
+- `run()` 내 SIGTERM 핸들러 등록: 수신 시 `_stop_event.set()`
+- `while True:` → `while not self._stop_event.is_set():` 로 변경하여 `finally` 블록 보장
+
+### [#7] 오디오 출력 경합 방지 (`audio/beep_controller.py`, `main.py`)
+- `BeepController`에 `_pending_system_alert`, `request_system_alert()`, `pop_system_alert()` 추가
+- 배터리 경고: 직접 `play_alert()` 호출 → `beep.request_system_alert(RiskLevel.MID)` 로 변경
+- 메인 루프에서 시스템 경고와 퓨전 결과를 병합 후 단일 경로로 재생 (경합 제거)
+- `_mute_active` 플래그 체크 추가로 음소거 상태 존중
+
+### [#8] NMSBoxes 반환 타입 대응 (`vision/rknn_detector.py`)
+- `indices.flatten()` → `np.array(indices).flatten()` 로 변경
+- list/tuple 반환 환경에서도 AttributeError 없이 동작
+
+### 테스트 결과
+- **92 tests passing** (기존 92개 모두 통과, 회귀 없음)

@@ -1,5 +1,6 @@
 """비프음 주기 제어 모듈."""
 import time
+from typing import Optional
 
 import config
 from fusion.engine import RiskLevel
@@ -15,6 +16,27 @@ class BeepController:
 
     def __init__(self) -> None:
         self._last_alert_time: float = 0.0
+        self._pending_system_alert: Optional[RiskLevel] = None
+
+    def request_system_alert(self, risk_level: RiskLevel) -> None:
+        """배터리 부족 등 시스템 경고를 스케줄링한다.
+
+        기존 대기 경고보다 우선순위가 높을 때만 교체하여 중요 경보가 소실되지 않도록 한다.
+
+        Args:
+            risk_level: 요청할 위험 수준.
+        """
+        if (
+            self._pending_system_alert is None
+            or risk_level.value > self._pending_system_alert.value
+        ):
+            self._pending_system_alert = risk_level
+
+    def pop_system_alert(self) -> Optional[RiskLevel]:
+        """대기 중인 시스템 경고를 반환하고 초기화한다."""
+        alert = self._pending_system_alert
+        self._pending_system_alert = None
+        return alert
 
     def should_beep(self, risk_level: RiskLevel) -> bool:
         """현재 시각 기준으로 비프음을 출력해야 하는지 판단한다.

@@ -1,82 +1,57 @@
-# 2026-06-27 오늘의 작업
-
-## Phase 5 · 시스템 최적화 및 안정화 완료
-
-### 5-1 · E2E Latency 프로파일링
-- `logs/logger.py`: `FIELDNAMES`에 `latency_ms` 컬럼 추가, `write_row()` 파라미터 추가
-- `main.py`: `vision_ts` 기준 EMA 레이턴시 측정 (`_FPS_EMA_ALPHA` 평활화), 400ms 초과 시 경고 로그, CSV 기록
-
-### 5-2 · Thermal Graceful Degradation
-- `config.py`: `THERMAL_THROTTLE_TEMP_C = 80.0`, `THERMAL_THROTTLE_FPS = 5` 추가
-- `main.py`:
-  - `RasEyesApp`에 `self._thermal_event = threading.Event()` 추가
-  - `_vision_worker()` 시그니처에 `throttle_event: Optional[threading.Event] = None` 추가 (기존 호출 하위 호환 유지)
-  - vision worker: 스로틀 활성화 시 추론 후 `1/THERMAL_THROTTLE_FPS` 슬립
-  - 메인 루프: CSV 기록 주기(1초)마다 CPU 온도 확인 → 80°C 초과 시 event.set() + frame_interval 하향, 복귀 시 자동 원복
-
-### 5-3 · 카메라 가림 감지
-- `config.py`: `CAMERA_OCCLUSION_CHANGE_THRESH = 3.0`, `CAMERA_OCCLUSION_FRAMES = 15`, `CAMERA_OCCLUSION_COOLDOWN_SEC = 5.0` 추가
-- `main.py`:
-  - `import numpy as np` 추가
-  - 비전 큐에서 프레임 변수 `last_frame` 으로 명시 수신 (기존 `_` → `last_frame`)
-  - 연속 프레임 간 `np.mean(|curr - prev|)` 으로 픽셀 변화량 측정
-  - 15 프레임 연속 변화량 < 3.0 시 HIGH 경보 + 5초 쿨다운
-
-### 5-4 · 배터리 잔량 경고
-- `config.py`: `BATTERY_LOW_THRESHOLD_PCT = 20`, `BATTERY_CHECK_INTERVAL_SEC = 30.0`, `BATTERY_SYSFS_PATH` 추가
-- `main.py`: `_read_battery_percent()` 함수 신규 추가 (`_read_cpu_temp()`와 동일 패턴), 30초 주기 확인, 20% 미만 시 MID 경보
-
-### 5-5 · 액티브 쿨러 PWM 제어
-- `scripts/pwm_fan_control.py` 신규 생성
-  - `/sys/class/pwm/pwmchip0/pwm0/` sysfs 제어
-  - 온도→듀티 선형 보간: <50°C→20%, 50~70°C→20~80%, ≥80°C→100%
-  - 5초 주기 루프, SIGTERM/SIGINT graceful exit
-
-### 테스트
-- `tests/test_phase5.py` 신규 생성 (20개 테스트)
-- **최종 결과: 92 tests passing** (기존 72 + 신규 20)
+# 착용 테스트 체크리스트 (2026-07-06)
 
 ---
 
-## Phase 5 코드 리뷰 피드백 반영 (feedback.txt)
+## 테스트 전 준비
 
-### [#1] E2E 레이턴시 중복 누적 버그 수정 (`main.py`)
-- E2E 레이턴시 계산 블록 직후 `current_vision_ts = None` 리셋 추가
-- 신규 비전 프레임을 수신했을 때만 EMA에 갱신되도록 수정
+- [ ] 이어폰 꽂고 `main.py` 실행 → 부팅 비프음 들리는지 확인
+- [ ] 카메라 방향 확인 — 가슴~머리 높이 사각지대를 커버하는지
 
-### [#2] RKNN 클래스 라벨 불일치 수정 (`vision/rknn_detector.py`)
-- COCO 80개 클래스 이름 테이블 `_COCO_CLASSES` 추가
-- `label=str(class_ids[i])` → `label=_COCO_CLASSES[int(class_ids[i])]` 로 변경
-- CPU YoloDetector와 동일하게 문자열 클래스명 반환
+---
 
-### [#3] 발열 스로틀링 히스테리시스 추가 (`config.py`, `main.py`)
-- `config.py`에 `THERMAL_RECOVERY_TEMP_C = 75.0` 추가
-- 진입: 80°C 초과 시 스로틀, 복구: 75°C 이하 시 해제 (5°C 마진)
-- 80°C 경계에서의 채터링/헌팅 현상 방지
+## 경보음 의미
 
-### [#4] ButtonHandler 연동 (`main.py`)
-- `RasEyesApp.__init__`에 `_button_handler`, `_mute_active` 필드 추가
-- `_toggle_mute()` 콜백 추가 (버튼 누름 → 오디오 음소거 토글)
-- `start()`: `use_hw` 모드에서 ButtonHandler 초기화, gpiod 미설치 시 graceful 경고
-- `stop()`: ButtonHandler 정지 포함
+| 소리 패턴 | 의미 | 행동 |
+|-----------|------|------|
+| 높은 음 빠르게 반복 (삑삑삑삑...) | 장애물 **100cm 이내** — 즉각 위험 | 즉시 멈추거나 방향 전환 |
+| 낮은 음 느리게 반복 (삑... 삑...) | 장애물 **150cm 이내** — 주의 거리 | 속도 줄이고 주의 |
+| 짧게 세 번 연속 (삑삑삑, 한 뭉치) | **카메라 렌즈 가림** — 탐지 불가 상태 | 카메라 위치·렌즈 확인 |
 
-### [#5] PWM 초기화 순서 수정 (`scripts/pwm_fan_control.py`)
-- `period` 쓰기 전 `duty_cycle = 0` 먼저 기록하여 EINVAL(duty_cycle > period) 방지
+> **ToF 단독 모드**: 빛이 어둡거나 카메라 FPS가 낮아지면 자동 전환. 소리 패턴은 동일하지만 거리만으로 판단함.
 
-### [#6] SIGTERM Graceful Shutdown 추가 (`main.py`)
-- `signal` 모듈 import 추가
-- `run()` 내 SIGTERM 핸들러 등록: 수신 시 `_stop_event.set()`
-- `while True:` → `while not self._stop_event.is_set():` 로 변경하여 `finally` 블록 보장
+---
 
-### [#7] 오디오 출력 경합 방지 (`audio/beep_controller.py`, `main.py`)
-- `BeepController`에 `_pending_system_alert`, `request_system_alert()`, `pop_system_alert()` 추가
-- 배터리 경고: 직접 `play_alert()` 호출 → `beep.request_system_alert(RiskLevel.MID)` 로 변경
-- 메인 루프에서 시스템 경고와 퓨전 결과를 병합 후 단일 경로로 재생 (경합 제거)
-- `_mute_active` 플래그 체크 추가로 음소거 상태 존중
+## 실내 테스트
 
-### [#8] NMSBoxes 반환 타입 대응 (`vision/rknn_detector.py`)
-- `indices.flatten()` → `np.array(indices).flatten()` 로 변경
-- list/tuple 반환 환경에서도 AttributeError 없이 동작
+| # | 시나리오 | 확인 포인트 |
+|---|----------|-------------|
+| 1 | 사람이 정면에서 접근 | 150cm에서 MID, 100cm 이내에서 HIGH 비프로 전환되는지 |
+| 2 | 의자·테이블 앞 접근 | 거리 임계값 정상 동작, 오탐지 없는지 |
+| 3 | 문틀 통과 | 통과 중 불필요한 경보 없는지 (오탐지 < 1회/분 KPI) |
+| 4 | 조명 어두운 방 | Confidence < 0.4 → ToF 단독 모드 전환 로그 확인 |
+| 5 | 정지 상태 (장애물 없음) | 경보 울리지 않는지 (false positive 없는지) |
+| 6 | E2E 레이턴시 | 장애물 인식 → 비프음까지 체감 딜레이 500ms 이내인지 |
 
-### 테스트 결과
-- **92 tests passing** (기존 92개 모두 통과, 회귀 없음)
+---
+
+## 실외 테스트
+
+| # | 시나리오 | 확인 포인트 |
+|---|----------|-------------|
+| 7 | 직사광선 환경 | 탐지 정확도 유지되는지, 열 스로틀링(80°C) 발동 여부 |
+| 8 | 역광 / 강한 그림자 | Confidence 저하 → ToF fallback 전환 여부 |
+| 9 | 보행 중 사람 탐지 | 움직이는 대상 탐지 Recall — 놓치는 케이스 기록 |
+| 10 | 주차 차량·기둥 | 비생물 장애물 탐지 여부 |
+| 11 | 비프음 볼륨 | 실외 소음 속에서도 들리는지 (필요 시 볼륨 조정) |
+| 12 | 장시간 착용 안정성 | 10분 이상 연속 동작 중 crash·freeze 없는지 |
+
+---
+
+## 공통 기록 항목
+
+테스트 중 아래 수치를 로그(`logs/*.csv`)에서 확인:
+
+- `fps` — 15 FPS 이상 유지되는지
+- `latency_ms` — 500ms 초과 빈도
+- `tof_distance_cm` — 실제 거리와 센서값 일치 여부
+- `alert_triggered` — 오탐지 횟수 (목표: < 1회/분)

@@ -487,7 +487,7 @@ class RasEyesApp:
                         config.CAMERA_OCCLUSION_FRAMES,
                         config.CAMERA_OCCLUSION_CHANGE_THRESH,
                     )
-                    self._audio.play_alert(RiskLevel.HIGH)
+                    self._audio.play_occlusion_alert()
                     _last_occlusion_alert_time = now
 
             now = time.monotonic()

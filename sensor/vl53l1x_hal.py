@@ -1,5 +1,6 @@
 """VL53L1X ToF 센서 HAL 구현체 (Orange Pi 5, i2c-5)."""
 import logging
+import threading
 
 import config
 from sensor.hal import BaseToFHAL
@@ -69,7 +70,7 @@ class VL53L1XHAL(BaseToFHAL):
             self._tof.set_timing(
                 self._timing_budget_us, self._inter_measurement_ms
             )
-            self._tof.start_ranging(2)  # 2 = MEDIUM (최대 3m, 33ms+ 타이밍 버짓 지원 → 50ms OK)
+            self._tof.start_ranging(2)  # 2 = MEDIUM (최대 3m, 200ms+ 타이밍 버짓 필요)
         except Exception as exc:
             if self._tof is not None:
                 try:
@@ -90,18 +91,30 @@ class VL53L1XHAL(BaseToFHAL):
     def read_distance_cm(self) -> float:
         """현재 거리 측정값을 cm 단위로 반환한다.
 
-        VL53L1X가 out-of-range(0mm)를 반환하면 config.TOF_OUT_OF_RANGE_CM을
-        반환하여 퓨전 엔진의 OoR 처리 로직과 연동한다.
+        get_distance()가 하드웨어 이슈로 무한 블로킹하는 경우를 방지하기 위해
+        1초 timeout을 적용한다. timeout 시 RuntimeError를 발생시켜 워커가 재시도한다.
 
         Returns:
             측정된 거리 (cm). 범위 초과 시 TOF_OUT_OF_RANGE_CM.
 
         Raises:
-            RuntimeError: start() 미호출 시.
+            RuntimeError: start() 미호출 또는 get_distance() timeout 시.
         """
         if not self._running or self._tof is None:
             raise RuntimeError("start()를 먼저 호출하세요.")
-        distance_mm = self._tof.get_distance()
+
+        result: list = [None]
+
+        def _read() -> None:
+            result[0] = self._tof.get_distance()
+
+        t = threading.Thread(target=_read, daemon=True)
+        t.start()
+        t.join(timeout=1.0)
+        if result[0] is None:
+            raise RuntimeError("get_distance() 1초 timeout — 센서 무응답")
+
+        distance_mm = result[0]
         if distance_mm == 0:
             return config.TOF_OUT_OF_RANGE_CM
         return distance_mm / 10.0  # mm → cm

@@ -23,7 +23,7 @@ AUDIO_MID_RISK_INTERVAL_MS: int = 500
 
 # Performance Monitoring
 DATA_STALENESS_THRESHOLD_SEC: float = 0.5
-FPS_FALLBACK_THRESHOLD: int = 10
+FPS_FALLBACK_THRESHOLD: int = 8
 
 # Vision Model
 YOLO_MODEL_PATH: str = "yolov8n.pt"
@@ -46,8 +46,8 @@ OOR_SOFT_RESET_COUNT: int = 3        # 연속 OoR 횟수 이상이면 필터 소
 CSI_DEVICE_PATH: str = "/dev/video11"          # OV13855 MIPI CSI mainpath
 TOF_I2C_PORT: int = 5                          # i2c-5 (I2C5_M3 overlay)
 TOF_I2C_ADDRESS: int = 0x29                    # VL53L1X 기본 I2C 주소
-TOF_TIMING_BUDGET_US: int = 50_000             # 50ms: 속도/정확도 균형
-TOF_INTER_MEASUREMENT_MS: int = 50             # 측정 간격 (ms)
+TOF_TIMING_BUDGET_US: int = 200_000            # 200ms: MEDIUM mode 안정 동작 최소값
+TOF_INTER_MEASUREMENT_MS: int = 210           # timing_budget + 10ms 마진
 RKNN_MODEL_PATH: str = "yolov8n.rknn"          # NPU 추론 모델 경로
 GPIO_BUTTON_PIN: int = 26                      # 물리 버튼 GPIO 핀 번호
 

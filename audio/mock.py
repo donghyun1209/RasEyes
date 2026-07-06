@@ -28,6 +28,11 @@ class MockAudio(BaseAudioHAL):
         self.last_alert = risk_level
         logger.info("[MockAudio] 경보 출력: %s", risk_level.name)
 
+    def play_occlusion_alert(self) -> None:
+        if not self._running:
+            raise RuntimeError("Audio module not started. Call start() first.")
+        logger.info("[MockAudio] 카메라 가림 경보 출력")
+
     def stop(self) -> None:
         self._running = False
         logger.info("[MockAudio] 오디오 시스템 종료")

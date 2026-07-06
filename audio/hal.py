@@ -28,6 +28,14 @@ class BaseAudioHAL(ABC):
         ...
 
     @abstractmethod
+    def play_occlusion_alert(self) -> None:
+        """카메라 가림 경보음을 출력한다.
+
+        장애물 경보(play_alert)와 구분되는 패턴으로 출력해야 한다.
+        """
+        ...
+
+    @abstractmethod
     def stop(self) -> None:
         """오디오 시스템 리소스를 해제한다."""
         ...

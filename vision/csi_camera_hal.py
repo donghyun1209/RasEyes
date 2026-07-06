@@ -1,5 +1,6 @@
 """OV13855 MIPI CSI 카메라 HAL 구현체 (Orange Pi 5)."""
 import logging
+import subprocess
 
 import cv2
 import numpy as np
@@ -37,12 +38,43 @@ class CSICameraHAL(BaseCameraHAL):
         self._cap: cv2.VideoCapture | None = None
         self._needs_resize: bool = False
 
+    def _setup_isp_pipeline(self) -> None:
+        """ISP 미디어 파이프라인과 센서 노출을 초기화한다.
+
+        재부팅 후 rkisp ISP pad2(출력)이 미설정 상태로 남아 검은 프레임을 출력하는
+        현상을 방지한다. 실패해도 경고만 남기고 진행한다.
+        """
+        fmt = f"SBGGR10_1X10/{self._width}x{self._height}"
+        out_fmt = f"YUYV8_2X8/{self._width}x{self._height}"
+        crop = f"crop:(0,0)/{self._width}x{self._height}"
+        cmds = [
+            ["media-ctl", "-d", "/dev/media0", "--set-v4l2",
+             f'"m01_b_ov13855 7-0036":0[fmt:{fmt}]'],
+            ["media-ctl", "-d", "/dev/media1", "--set-v4l2",
+             f'"rkcif-mipi-lvds":0[fmt:{fmt}]'],
+            ["media-ctl", "-d", "/dev/media1", "--set-v4l2",
+             f'"rkisp-isp-subdev":0[fmt:{fmt} {crop}]'],
+            ["media-ctl", "-d", "/dev/media1", "--set-v4l2",
+             f'"rkisp-isp-subdev":2[fmt:{out_fmt} {crop}]'],
+            ["v4l2-ctl", "-d", config.CSI_DEVICE_PATH,
+             f"--set-fmt-video=width={self._width},height={self._height},pixelformat=UYVY"],
+            ["v4l2-ctl", "-d", config.CSI_SENSOR_SUBDEV,
+             f"--set-ctrl=exposure={config.CSI_SENSOR_EXPOSURE},"
+             f"analogue_gain={config.CSI_SENSOR_GAIN}"],
+        ]
+        for cmd in cmds:
+            try:
+                subprocess.run(cmd, capture_output=True, timeout=5, check=False)
+            except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+                logger.warning("ISP 파이프라인 설정 건너뜀: %s", exc)
+
     def start(self) -> None:
         """VideoCapture를 열고 해상도·FPS를 설정한다.
 
         Raises:
             RuntimeError: 카메라 장치를 열 수 없을 때.
         """
+        self._setup_isp_pipeline()
         self._cap = cv2.VideoCapture(self._device_path)
         if not self._cap.isOpened():
             self._cap = None

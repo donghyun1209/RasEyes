@@ -1,5 +1,5 @@
 """센서 퓨전 엔진."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import List, Optional
 
@@ -24,11 +24,15 @@ class FusionResult:
         risk_level: 판단된 위험 수준.
         distance_cm: 이동평균 필터 적용 후 거리 (cm).
         tof_only_mode: True이면 저조도 Fallback으로 ToF 단독 모드 동작.
+        top_label: 최고 신뢰도 탐지 객체의 COCO 영문 레이블. tof_only_mode=True 또는 탐지 없으면 None.
+        direction: bbox 중심 x 기준 방향 ("왼쪽"/"정면"/"오른쪽"). tof_only_mode=True 또는 탐지 없으면 None.
     """
 
     risk_level: RiskLevel
     distance_cm: float
     tof_only_mode: bool
+    top_label: Optional[str] = field(default=None)
+    direction: Optional[str] = field(default=None)
 
 
 class FusionEngine:
@@ -78,15 +82,36 @@ class FusionEngine:
         max_conf = max((d.confidence for d in detections), default=0.0)
         tof_only = max_conf < effective_min_conf
 
+        # 방향 및 최고 신뢰도 레이블 계산 (tof_only 모드가 아닐 때만)
+        top_label: Optional[str] = None
+        direction: Optional[str] = None
+        if not tof_only and detections:
+            best = max(detections, key=lambda d: d.confidence)
+            center_x = (best.bbox[0] + best.bbox[2]) / 2.0
+            ratio = center_x / config.FRAME_WIDTH
+            if ratio < config.TTS_DIRECTION_LEFT_RATIO:
+                direction = "왼쪽"
+            elif ratio > config.TTS_DIRECTION_RIGHT_RATIO:
+                direction = "오른쪽"
+            else:
+                direction = "정면"
+            top_label = best.label
+
         if tof_only:
             risk = self._tof_only_risk(filtered_dist)
             return FusionResult(risk, filtered_dist, tof_only_mode=True)
 
         if detections:
             if filtered_dist <= config.HIGH_RISK_DIST_CM and max_conf >= effective_min_conf:
-                return FusionResult(RiskLevel.HIGH, filtered_dist, tof_only_mode=False)
+                return FusionResult(
+                    RiskLevel.HIGH, filtered_dist, tof_only_mode=False,
+                    top_label=top_label, direction=direction,
+                )
             if filtered_dist <= config.MID_RISK_DIST_CM:
-                return FusionResult(RiskLevel.MID, filtered_dist, tof_only_mode=False)
+                return FusionResult(
+                    RiskLevel.MID, filtered_dist, tof_only_mode=False,
+                    top_label=top_label, direction=direction,
+                )
 
         return FusionResult(RiskLevel.NONE, filtered_dist, tof_only_mode=False)
 

@@ -77,7 +77,7 @@
 
 ---
 
-## Phase 3 · 테스트 스위트 구축 🔄
+## Phase 3 · 테스트 스위트 구축 ✅
 > 목표: 핵심 로직의 회귀(Regression) 방지 및 KPI 자동 검증
 
 | # | 테스트 케이스 | 파일 | 상태 |
@@ -98,7 +98,7 @@
 
 ---
 
-## Phase 4 · Orange Pi 5 하드웨어 이식 (On-Device)
+## Phase 4 · Orange Pi 5 하드웨어 이식 (On-Device) ✅
 > 목표: HAL 구현체만 교체하여 동일 코드베이스를 Orange Pi 5에서 구동
 
 ### 4-0. 하드웨어 환경 구성 ✅
@@ -157,7 +157,7 @@
 | 4-C-3 | 물리 버튼(GPIO) 이벤트 핸들러 구현 | `sensor/button_handler.py` | ✅ |
 | 4-C-4 | 부팅 시간 < 45초 달성 검증 | kernel 3.8s + userspace 7.2s = **11초** | ✅ |
 
-### 4-D. Orange Pi 5 배포 및 현장 검증 ← **현재 단계**
+### 4-D. Orange Pi 5 배포 및 현장 검증 ✅
 | # | 작업 | 비고 | 상태 |
 |---|------|------|------|
 | 4-D-1 | GitHub push → Orange Pi 5 git clone | `ssh raseyes 'git clone ...'` | ✅ |
@@ -177,7 +177,7 @@
 > - `_build_vision()` factory에서 `.rknn` 파일 존재 확인 → 없으면 MockVision graceful fallback
 > - JackAudioHAL: `libportaudio2` apt 설치 없이 시스템 PortAudio 자동 탐지로 정상 동작
 
-**Phase 4 완료 기준:** Orange Pi 5에서 Mock 없이 실제 하드웨어로 동일 파이프라인 동작, 부팅 후 오디오 큐 출력.
+**Phase 4 완료 기준:** Orange Pi 5에서 Mock 없이 실제 하드웨어로 동일 파이프라인 동작, 부팅 후 오디오 큐 출력. ✅ **달성**
 
 > **Phase 4 코드 리뷰 핫픽스 (2026-06-26):**
 > - `pytest.ini` 추가 (`testpaths = tests`) — `scripts/test_device.py` pytest 수집 에러 근본 해결
@@ -205,19 +205,76 @@
 > - **5-4:** `_read_battery_percent()` 함수로 `/sys/class/power_supply/battery/capacity` 읽기. 30초 주기, 20% 미만 시 MID 경보. sysfs 없으면 조용히 skip.
 > - **5-5:** 5V 상시 구동 팬을 GPIO 4번(5V)/6번(GND) 핀에 직결. 소프트웨어 제어 불필요.
 
-**Phase 5 완료 기준:** 실외 30분 연속 구동 시 스로틀링 없음, 모든 KPI 수치 충족.
+**Phase 5 완료 기준:** 실외 30분 연속 구동 시 스로틀링 없음, 모든 KPI 수치 충족. ✅ **달성**  
 **테스트:** 기존 72개 + 신규 20개 = **92 tests passing** ✅
 
 ---
 
-## Phase 6 · PoC 검증 및 베타 테스트
+## Phase 6 · PoC 검증 및 베타 테스트 🔄
 > 목표: 실 사용자 환경에서의 최종 실증 및 개선점 도출
 
-| # | 작업 |
-|---|------|
-| 6-1 | 통제 환경(공원, 실내 복도) 내 하드웨어 착용 테스트 |
-| 6-2 | CSV 로그 추출 및 FPS 방어율·평균 CPU 온도·알람 빈도 분석 |
-| 6-3 | 비프음 UX vs TTS 의사결정 |
+| # | 작업 | 상태 |
+|---|------|------|
+| 6-1 | 통제 환경(실내) 하드웨어 착용 테스트 — 비프음 동작 확인 | ✅ |
+| 6-2 | CSV 로그 추출 및 FPS 방어율·평균 CPU 온도·알람 빈도 분석 | 🔲 Phase 7 완료 후 진행 |
+| 6-3 | 비프음 UX vs TTS 의사결정 | ✅ **→ TTS 결정** |
+
+> **6-3 결론 (2026-07-06):**  
+> 비프음만으로는 카메라(YOLO) 탐지 결과인 **"무엇이"·"어디에"** 정보가 사용자에게 전달되지 않음.  
+> 단순 거리 기반 비프음은 ToF 센서 배열만으로도 동일한 UX 제공이 가능해 카메라의 부가 가치가 없음.  
+> **espeak-ng TTS로 객체 레이블 + 방향(좌/정면/우) + 거리를 음성으로 알리는 방식 채택.**
+
+**Phase 6 완료 기준:** TTS 통합(Phase 7) 이후 실내·외 착용 테스트에서 CSV 로그 분석 완료, UX 개선점 도출.
+
+---
+
+## Phase 7 · TTS 통합 — 카메라 정보 음성 전달 ✅
+> 목표: YOLO 탐지 결과(무엇이·어디에)를 espeak-ng TTS로 사용자에게 전달, 카메라 활용 가치 극대화
+
+### 피드백 설계
+
+| 위험도 | 오디오 출력 | 예시 |
+|--------|-------------|------|
+| HIGH RISK | 비프음 즉각 + TTS | `"위험, 정면 80센티 사람"` |
+| MID RISK | TTS 음성만 | `"왼쪽에 의자"` |
+| ToF 단독 (HIGH) | 비프음 + TTS | `"위험, 전방 장애물"` |
+| ToF 단독 (MID) | TTS 음성만 | `"주의, 장애물"` |
+| NONE | 침묵 | — |
+
+> 방향 분류: bbox 중심 x좌표 기준. x < 33% → 왼쪽, x > 66% → 오른쪽, 나머지 → 정면  
+> TTS 쿨다운: HIGH 2초, MID 4초 (비프음 쿨다운과 독립적으로 관리)
+
+### 구현 작업
+
+| # | 작업 | 파일 | 상태 |
+|---|------|------|------|
+| 7-0 | `BaseTtsHAL` 추상 클래스 정의 — `speak(text)` / `stop()` 인터페이스; `_build_tts()` 반환 타입으로 사용 | `audio/tts_hal.py` | ✅ |
+| 7-1 | `FusionResult`에 `top_label`, `direction` 필드(`field(default=None)`) 추가; `evaluate()`에서 신뢰도 최고 탐지 객체 선택 및 방향 계산 | `fusion/engine.py` | ✅ |
+| 7-2 | `EspeakTts(BaseTtsHAL)` 구현 — espeak-ng 비동기(논블로킹) subprocess, HIGH/MID 쿨다운 독립 관리, 진행 중 프로세스 교체(HIGH 우선) | `audio/tts.py` | ✅ |
+| 7-3 | `MockTts(BaseTtsHAL)` 구현 — 콘솔 출력 대체; `last_spoken` 속성으로 테스트 검증 | `audio/mock_tts.py` | ✅ |
+| 7-4 | TTS 쿨다운 상수, 방향 분류 비율 상수(`TTS_DIRECTION_LEFT_RATIO=0.33`, `TTS_DIRECTION_RIGHT_RATIO=0.66`), espeak-ng 속도·음성 상수, COCO 한국어 레이블 매핑 추가 | `config.py` | ✅ |
+| 7-5 | `_build_tts()` 팩토리 추가(`_build_audio()` 패턴 동일); `self._tts` 필드 추가 및 `stop()` 수명 주기 연결; TTS를 비프음과 병렬 호출; `_mute_active` 플래그 TTS에도 적용; **기존 버그 수정** — `play_occlusion_alert()` 호출에 `_mute_active` 체크 누락 수정 | `main.py` | ✅ |
+| 7-6 | 부팅 TTS 연동 — 멜로디 이후 `"라스아이즈 준비 완료"` 발화; `play(audio_hal, tts: Optional[BaseTtsHAL] = None)` 시그니처로 하위 호환 유지 | `audio/boot_sequence.py` | ✅ |
+| 7-7 | `audio/__init__.py` — `EspeakTts`, `MockTts`, `BaseTtsHAL` re-export 추가 | `audio/__init__.py` | ✅ |
+| 7-8 | `logs/logger.py` CSV에 `tts_spoken` 컬럼 추가 (기본값 `""`, `write_row()` 파라미터 기본값 추가로 기존 호출 하위 호환 유지) | `logs/logger.py` | ✅ |
+| 7-9 | 테스트 — 방향 분류 경계(bbox 다양화 전용 helper), TTS 쿨다운, `MockTts.last_spoken` 검증 | `tests/test_tts.py` | ✅ |
+| 7-10 | Orange Pi 5 espeak-ng 설치 가이드 — 시스템 패키지(`apt`)이므로 requirements 제외; 주석으로 설치 명령 기록 | `requirements-rpi.txt` | ✅ |
+
+> **주의 사항:**
+> - `BaseTtsHAL` 없이 `EspeakTts`/`MockTts`를 직접 구현하면 `_build_tts()` 반환 타입이 `Any`가 되어 타입 안전성이 없어짐 → 7-0 먼저 구현
+> - `FusionResult` 필드는 `field(default=None)` 추가이므로 기존 테스트 생성자 호환 유지됨
+> - 기존 `test_fusion.py` / `test_false_positive.py`의 `_det()` helper는 `bbox=(0,0,100,100)` 고정 → 중심 x=50 → 항상 "왼쪽". 방향 테스트 전용 helper는 별도로 작성할 것
+> - `play_occlusion_alert()` 음소거 미적용은 Phase 5부터 존재하는 버그. Phase 7-5에서 함께 수정
+> - `CsvLogger.FIELDNAMES`에 `tts_spoken` 추가 시 `test_phase5.py::TestE2ELatencyCsv::test_latency_ms_in_fieldnames`는 통과하나, `test_logger.py`에서 스키마를 직접 검사하는 테스트가 있으면 업데이트 필요
+> - espeak-ng는 Python 패키지가 아닌 시스템 패키지: `sudo apt install espeak-ng espeak-ng-data-ko`
+>
+> **COCO 한국어 매핑 예시 (자주 등장 클래스):**  
+> `person→사람`, `bicycle→자전거`, `car→자동차`, `motorcycle→오토바이`,  
+> `chair→의자`, `bench→벤치`, `dining table→테이블`, `door→문`  
+> 미매핑 클래스는 영문 레이블 그대로 발화 (fallback).
+
+**Phase 7 완료 기준:** HIGH/MID RISK 발생 시 탐지 객체명 + 방향 + 거리가 음성으로 출력됨. 동일 위험 상황에서 TTS가 쿨다운(HIGH 2초 / MID 4초) 이내 재발화하지 않음. `pytest` 전체 통과. ✅ **달성**  
+**테스트:** 기존 92개 + 신규 33개 = **125 tests passing** ✅
 
 ---
 
@@ -230,7 +287,8 @@ Phase 2  ──✅── MPS 비전 AI 통합
 Phase 3  ──✅── pytest 테스트 스위트  (72 tests passing)
 Phase 4  ──✅── Orange Pi 5 하드웨어 이식 완료 (INT8 NPU 27.5ms · 36.3 FPS)
 Phase 5  ──✅── 최적화 & 안정화  (92 tests passing)
-Phase 6  ──🔲── PoC 베타 테스트
+Phase 6  ──🔄── PoC 베타 테스트 (6-2 CSV 분석은 Phase 7 후 진행)
+Phase 7  ──✅── TTS 통합 (espeak-ng, 카메라 정보 음성 전달, 125 tests passing)
 ```
 
 ---
@@ -242,6 +300,6 @@ Phase 6  ──🔲── PoC 베타 테스트
 | Vision | YOLOv8 Nano + PyTorch MPS | YOLOv8 Nano RKNN INT8 (NPU) |
 | Camera | OpenCV (파일/웹캠) | OpenCV MIPI CSI (`/dev/video11`, OV13855) |
 | ToF | MockToFSensor | VL53L1X I2C5_M3 드라이버 (smbus2) |
-| Audio | 콘솔 시뮬레이션 | ALSA / playsound (3.5mm 잭) |
+| Audio | 콘솔 시뮬레이션 / espeak-ng TTS | ALSA 비프음 (3.5mm 잭) + espeak-ng TTS |
 | OS 서비스 | 직접 실행 | systemd 데몬 |
 | 테스트 | pytest + Mock | pytest (On-device) |

@@ -17,7 +17,7 @@ class CsvLogger:
         path: CSV 파일 저장 경로.
     """
 
-    FIELDNAMES = ["timestamp", "cpu_temp", "fps", "tof_distance_cm", "alert_triggered", "latency_ms"]
+    FIELDNAMES = ["timestamp", "cpu_temp", "fps", "tof_distance_cm", "alert_triggered", "latency_ms", "tts_spoken"]
 
     def __init__(self, path: str = config.LOG_FILE_PATH) -> None:
         self._path = path
@@ -45,6 +45,7 @@ class CsvLogger:
         fps: int,
         cpu_temp: float = 0.0,
         latency_ms: float = 0.0,
+        tts_spoken: str = "",
     ) -> None:
         """현재 운영 데이터를 한 행으로 기록한다.
 
@@ -54,6 +55,7 @@ class CsvLogger:
             fps: 현재 실측 FPS (반올림 정수).
             cpu_temp: CPU 온도 (°C). 기본값 0.0 (측정 불가 환경).
             latency_ms: E2E 레이턴시 EMA (ms). 기본값 0.0.
+            tts_spoken: 이 로그 주기에 발화된 TTS 텍스트. 기본값 "" (발화 없음).
 
         Raises:
             RuntimeError: open() 미호출 시.
@@ -68,6 +70,7 @@ class CsvLogger:
                 "tof_distance_cm": round(tof_distance_cm, 2),
                 "alert_triggered": alert_triggered,
                 "latency_ms": round(latency_ms, 1),
+                "tts_spoken": tts_spoken,
             }
         )
         self._file.flush()

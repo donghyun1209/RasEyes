@@ -13,6 +13,7 @@ import os
 import queue
 import random
 import signal
+import subprocess
 import threading
 import time
 from typing import Callable, List, Optional, Tuple
@@ -21,9 +22,13 @@ import numpy as np
 
 import config
 from audio.beep_controller import BeepController
+from audio.boot_sequence import BootSequence
 from audio.hal import BaseAudioHAL
 from audio.mock import MockAudio
-from fusion.engine import FusionEngine, RiskLevel
+from audio.mock_tts import MockTts
+from audio.tts import EspeakTts
+from audio.tts_hal import BaseTtsHAL
+from fusion.engine import FusionEngine, FusionResult, RiskLevel
 from logs.logger import CsvLogger
 from sensor.button_handler import ButtonHandler
 from sensor.hal import BaseToFHAL
@@ -110,6 +115,54 @@ def _build_audio(use_mock: bool, use_hw: bool) -> BaseAudioHAL:
     except (ImportError, RuntimeError, OSError) as exc:
         logger.warning("JackAudioHAL 초기화 실패, MockAudio fallback: %s", exc)
         return MockAudio()
+
+
+def _build_tts(use_mock: bool) -> BaseTtsHAL:
+    """환경에 맞는 TTS 컴포넌트를 생성한다."""
+    if use_mock:
+        return MockTts()
+    try:
+        subprocess.run(
+            ["espeak-ng", "--version"],
+            capture_output=True,
+            check=True,
+            timeout=3,
+        )
+        # JackAudioHAL과 동일한 ES8388 장치 인덱스 공유 (장치 충돌 방지)
+        device_idx = None
+        try:
+            import sounddevice as _sd
+            device_idx = next(
+                (i for i, d in enumerate(_sd.query_devices())
+                 if "es8388" in d["name"].lower() and d["max_output_channels"] > 0),
+                None,
+            )
+        except Exception:
+            pass
+        return EspeakTts(device_idx=device_idx)
+    except (FileNotFoundError, subprocess.CalledProcessError, OSError) as exc:
+        logger.warning("espeak-ng 없음, MockTts fallback: %s", exc)
+        return MockTts()
+
+
+def _build_tts_text(result: FusionResult) -> Optional[str]:
+    """FusionResult에서 TTS 발화 텍스트를 생성한다.
+
+    Returns:
+        발화할 문자열. NONE 위험 수준이면 None.
+    """
+    if result.risk_level == RiskLevel.NONE:
+        return None
+    if result.tof_only_mode:
+        if result.risk_level == RiskLevel.HIGH:
+            return "위험, 전방 장애물"
+        return "주의, 장애물"
+    label = config.COCO_KO_LABELS.get(result.top_label or "", result.top_label or "물체")
+    direction = result.direction or "정면"
+    if result.risk_level == RiskLevel.HIGH:
+        dist = round(result.distance_cm)
+        return f"위험, {direction} {dist}센티 {label}"
+    return f"{direction}에 {label}"
 
 
 def _put_latest(q: "queue.Queue", item: object) -> None:
@@ -234,6 +287,7 @@ class RasEyesApp:
         self._sensor: BaseToFHAL = _build_sensor(use_mock, use_hw)
         self._fusion = FusionEngine()
         self._audio: BaseAudioHAL = _build_audio(use_mock, use_hw)
+        self._tts: BaseTtsHAL = _build_tts(use_mock)
         self._beep = BeepController()
         self._csv_logger = CsvLogger()
 
@@ -282,6 +336,7 @@ class RasEyesApp:
 
         mode = "Mock" if self._use_mock else "YoloDetector"
         logger.info("RasEyes 시작 (%s 모드, 병렬 스레드)", mode)
+        BootSequence().play(self._audio, self._tts)
 
     def _toggle_mute(self) -> None:
         """물리 버튼 누름 시 오디오 음소거 온/오프 전환."""
@@ -300,6 +355,7 @@ class RasEyesApp:
         self._vision.stop()
         self._sensor.stop()
         self._audio.stop()
+        self._tts.stop()
         self._csv_logger.close()
         logger.info("RasEyes 종료")
 
@@ -360,6 +416,9 @@ class RasEyesApp:
 
         # 5-4: 배터리 잔량 확인
         last_battery_check_time: float = 0.0
+
+        # 7: TTS 로그 주기 내 마지막 발화 텍스트 추적
+        _last_tts_text: str = ""
 
         while not self._stop_event.is_set():
             loop_start = time.monotonic()
@@ -467,6 +526,12 @@ class RasEyesApp:
             if self._beep.should_beep(effective_risk) and not self._mute_active:
                 self._audio.play_alert(effective_risk)
 
+            # TTS: 탐지 결과 기반 음성 알림 (비프음과 독립적으로 논블로킹 동작)
+            tts_phrase = _build_tts_text(result)
+            if tts_phrase and not self._mute_active:
+                self._tts.speak(tts_phrase, result.risk_level)
+                _last_tts_text = tts_phrase
+
             # 5-1: E2E 레이턴시 측정 (퓨전+오디오 결정 완료 시점, 신규 프레임 수신 시에만 갱신)
             if current_vision_ts is not None:
                 e2e_ms = (time.monotonic() - current_vision_ts) * 1000.0
@@ -487,7 +552,8 @@ class RasEyesApp:
                         config.CAMERA_OCCLUSION_FRAMES,
                         config.CAMERA_OCCLUSION_CHANGE_THRESH,
                     )
-                    self._audio.play_occlusion_alert()
+                    if not self._mute_active:
+                        self._audio.play_occlusion_alert()
                     _last_occlusion_alert_time = now
 
             now = time.monotonic()
@@ -527,9 +593,11 @@ class RasEyesApp:
                         fps=max(0, round(actual_fps)),
                         cpu_temp=cpu_temp,
                         latency_ms=round(e2e_ms_ema, 1),
+                        tts_spoken=_last_tts_text,
                     )
                 except Exception as exc:
                     logger.error("CSV 로그 기록 실패: %s", exc)
+                _last_tts_text = ""
                 last_log_time = now
 
                 # 5-4: 배터리 잔량 확인 (30초 주기)

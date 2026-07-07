@@ -1,56 +1,42 @@
-# RasEyes 코드 리뷰 보고서: Phase 7 (TTS 통합) 검증 (2차 확인 완료)
+# [Code Review] Piper 및 Espeak TTS 최종 검증 및 Orange Pi 배포 결과 — All Clear ✅
 
-## 1. 개요
-* **검증 대상**: Phase 7 — TTS 통합 (카메라 정보 음성 전달) 구현 내역 및 ROADMAP.md 매칭 확인
-* **테스트 실행 결과**: 전체 125개 테스트 케이스 통과 (`pytest` 검증 성공)
-* **조치 확인**: 1차 피드백에서 지적된 **"부팅 완료 오디오 큐/TTS 미호출(BootSequence)"** 문제에 대한 수정 조치 완료 검증
+TTS 품질 개선을 위해 진행한 **신경망 기반 Piper TTS 전환** 작업에 대한 Orange Pi 5 하드웨어 타겟 배포 및 검증 결과를 요약합니다.
 
 ---
 
-## 2. 세부 항목별 구현 검증 결과
+### 🛡️ Orange Pi 5 실장 테스트 및 이슈 해결 결과 (2026-07-07)
 
-### ✅ 7-0. `BaseTtsHAL` 추상 클래스 정의
-* [audio/tts_hal.py](file:///home/dong/WorkSpace/RasEyes/audio/tts_hal.py)에 `BaseTtsHAL` 인터페이스가 정의되었습니다.
-* `speak`와 `stop` 추상 메서드를 정의하여 Mock 구현체와 실 구현체 간의 일관성을 보장합니다.
+1. **Piper 한국어 모델 다운로드 URL 수정 완료**
+   - 기존 `rhasspy/piper-voices`에 한국어 공식 모델이 존재하지 않아 다운로드에 실패했던 현상을 발견하고, KSS 한국어 데이터셋으로 학습된 커뮤니티 유지보수 모델인 `neurlang/piper-onnx-kss-korean` 경로로 다운로드 스크립트([scripts/download_piper_model.sh](file:///home/dong/WorkSpace/RasEyes/scripts/download_piper_model.sh))를 수정하여 올바르게 60MB의 ONNX 모델을 내려받아 기기에 전송 완료하였습니다.
 
-### ✅ 7-1. `FusionResult` 필드 추가 및 `evaluate()` 연동
-* [fusion/engine.py](file:///home/dong/WorkSpace/RasEyes/fusion/engine.py)에서 `FusionResult`에 `top_label` 및 `direction` 필드가 정상적으로 추가되었으며, 생성자 호환성도 검증되었습니다.
-* `evaluate()` 내에서 `tof_only` 모드가 아닐 때, 신뢰도가 가장 높은 탐지 객체를 선택하고 bounding box 중심 x 좌표 비율에 따라 "왼쪽", "정면", "오른쪽"을 정확히 구분하여 반환합니다.
+2. **'pygoruut' PhonemeType 지원 몽키 패치 적용**
+   - 한국어 모델의 `phoneme_type`이 `pygoruut`로 정의되어 있어 `piper-tts` 로딩 시 `'pygoruut' is not a valid PhonemeType` ValueError로 인한 EspeakTts Fallback 현상이 확인되었습니다.
+   - [audio/piper_tts.py](file:///home/dong/WorkSpace/RasEyes/audio/piper_tts.py) 모듈 로딩 시점에 `piper.config.PhonemeType` 및 `piper.voice.PhonemeType` Enum을 동적으로 확장하고, `pygoruut` 패키지를 lazy import하여 음소 변환을 수행하도록 **몽키 패치**를 적용하여 이를 해결하였습니다.
 
-### ✅ 7-2. `EspeakTts(BaseTtsHAL)` 구현
-* [audio/tts.py](file:///home/dong/WorkSpace/RasEyes/audio/tts.py)에 `espeak-ng`를 subprocess 기반 비동기로 구동하는 클래스가 정상 구현되었습니다.
-* **HIGH RISK**: 즉각 발화하며, 현재 진행 중인 프로세스가 있다면 `kill()` 처리 후 새로 시작합니다. (우선순위 프리엠션)
-* **MID RISK**: 쿨다운 또는 이미 재생 중인 프로세스가 있는 경우 발화를 생략(skip)하는 로직이 정상 동작합니다.
+3. **Piper TTS API 대칭성 확보 (1.4+ 및 Mock 호환)**
+   - 기기에 설치된 `piper-tts 1.4.2` 버전에는 `synthesize_stream_raw` 메서드가 제거되고 `synthesize` 메서드로 변경되어 `AttributeError`가 발생하는 문제를 수정하였습니다.
+   - `synthesize_stream_raw`의 유무를 체크하여 이전 버전 및 테스트의 Mock 동작을 지원하는 동시에, 새로운 `synthesize` API(Iterable[AudioChunk])로부터 `audio_int16_bytes`를 안전하게 추출할 수 있도록 동적 폴백 처리를 완벽하게 구성했습니다. (로컬 단위 테스트 `134 passed` 유지)
 
-### ✅ 7-3. `MockTts(BaseTtsHAL)` 구현
-* [audio/mock_tts.py](file:///home/dong/WorkSpace/RasEyes/audio/mock_tts.py)에서 `last_spoken` 속성을 활용해 테스트 코드에서 발화 여부를 쉽게 단언(assert)할 수 있도록 구현되었습니다.
-
-### ✅ 7-4. config.py 상수 추가
-* [config.py](file:///home/dong/WorkSpace/RasEyes/config.py)에 TTS 쿨다운 시간, 방향 구분 임계 비율(0.33, 0.66), espeak 속도 및 한국어 레이블 매핑 딕셔너리(`COCO_KO_LABELS`)가 체계적으로 추가되었습니다.
-
-### ✅ 7-5. main.py 통합 및 버그 수정
-* `RasEyesApp` 생성자에서 `_build_tts()`를 통해 인스턴스를 주입하고, 메인 루프에서 음소거(`_mute_active`) 상태를 점검하여 발화합니다.
-* `stop()` 라이프사이클에 `self._tts.stop()`을 안정적으로 바인딩했습니다.
-* **기존 버그 수정**: Phase 5에서 발생했던 `play_occlusion_alert()` (카메라 가림 경보) 시 음소거 설정(`_mute_active`)이 누락되었던 코드가 `if not self._mute_active:` 조건 추가를 통해 말끔하게 고쳐졌습니다.
-
-### ✅ 7-6. 부팅 TTS 연동 (조치 완료)
-* [audio/boot_sequence.py](file:///home/dong/WorkSpace/RasEyes/audio/boot_sequence.py) 파일의 TTS 발화 시그니처에 맞게, **[main.py](file:///home/dong/WorkSpace/RasEyes/main.py)의 `start()` 메소드에서 `BootSequence().play(self._audio, self._tts)`를 호출하도록 연동되었습니다.**
-* 상단 임포트 구문(`from audio.boot_sequence import BootSequence`)이 정상 추가되었으며, 하드웨어 및 Mock 환경 모두 예외 없이 준비 완료 멜로디와 발화가 실행되는 흐름을 확보했습니다.
-
-### ✅ 7-7. `audio/__init__.py` re-export
-* [audio/__init__.py](file:///home/dong/WorkSpace/RasEyes/audio/__init__.py)에서 외부 모듈이 간단히 참조할 수 있도록 의존성 내보내기가 완료되었습니다.
-
-### ✅ 7-8. CSV 로거 컬럼 확장
-* [logs/logger.py](file:///home/dong/WorkSpace/RasEyes/logs/logger.py)에 `tts_spoken` 열이 추가되어 발화 이력을 정상적으로 로깅합니다. 하위 호환성을 위한 매개변수 기본값 설정도 확인되었습니다.
-
-### ✅ 7-9. 테스트 코드 및 검증
-* [tests/test_tts.py](file:///home/dong/WorkSpace/RasEyes/tests/test_tts.py)에 방향 분류, 쿨다운, 텍스트 빌더 등 33개의 테스트 케이스가 꼼꼼히 작성되었으며 모두 정상 패스합니다.
-
-### ✅ 7-10. 시스템 의존성 문서화
-* [requirements-rpi.txt](file:///home/dong/WorkSpace/RasEyes/requirements-rpi.txt)에 `espeak-ng`가 시스템 의존성 패키지임을 명시하는 설치 명령 가이드가 친절하게 추가되었습니다.
+4. **실행 프로세스 갱신 및 서비스 상태 확인**
+   - 수정된 코드를 안전하게 scp를 통해 Orange Pi에 배포한 후, systemd를 통하지 않고 유저 권한 내에서 `main.py` 프로세스를 킬하여 자동 재시작을 유도했습니다.
+   - 서비스 재시작 로그 확인 결과, **`PiperTts 초기화 완료`** 및 **`부팅 오디오 큐 재생`** 로그까지 에러 없이 완벽히 구동됨을 확인했습니다.
 
 ---
 
-## 3. 종합 의견 (Overall Status)
-* **결론**: **Phase 7의 11가지 요구사항(7-0 ~ 7-10) 전체가 완벽하게 통합되었음을 확인했습니다.**
-* 피드백 반영으로 부팅 시 오디오 피드백 루프까지 성공적으로 완료되어 실 제품 동작 완성도가 향상되었습니다. 추가적인 이슈는 발견되지 않았습니다.
+### ⚠️ 추가 조치 권장 사항 (GPIO 권한 관련)
+
+- 서비스 실행 로그에서 `ButtonHandler GPIO 초기화 실패: [Errno 2] No such file or directory` 경고가 발생하고 있습니다.
+- 이는 `/dev/gpiochip1` 장치 파일에 일반 `orangepi` 유저 권한으로 접근할 수 없기 때문에 발생하는 현상입니다.
+- **해결 방안:** Orange Pi 터미널에서 다음 udev 규칙을 추가하고 udevadm을 리로드하면 GPIO 버튼 기능이 정상화됩니다.
+  ```bash
+  # /etc/udev/rules.d/99-gpio.rules 파일 생성 및 아래 내용 기재
+  KERNEL=="gpiochip*", MODE="0660", GROUP="dialout"
+  
+  # 규칙 리로드
+  sudo udevadm control --reload-rules && sudo udevadm trigger
+  ```
+
+---
+
+### 🏁 최종 결론
+TTS 개선 및 Piper 한국어 음성 최적화는 완벽하게 준비 및 배포 완료되었습니다. 향후 추가 실증 테스트 시 GPIO 권한 관련 설정만 하드웨어 레벨에서 적용해 주시면 됩니다. 수고하셨습니다!

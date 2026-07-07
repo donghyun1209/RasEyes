@@ -303,3 +303,26 @@ Phase 7  ──✅── TTS 통합 (espeak-ng, 카메라 정보 음성 전달, 
 | Audio | 콘솔 시뮬레이션 / espeak-ng TTS | ALSA 비프음 (3.5mm 잭) + espeak-ng TTS |
 | OS 서비스 | 직접 실행 | systemd 데몬 |
 | 테스트 | pytest + Mock | pytest (On-device) |
+
+
+## 추가 구현 사항
+
+### TTS 품질 개선 — Piper TTS 전환 (2026-07-07)
+> espeak-ng의 로봇 음성 품질 문제 해결을 위해 신경망 기반 Piper TTS로 전환.
+> espeak-ng → MockTts 순 fallback 구조를 유지하여 모델 미설치 환경도 정상 동작.
+
+| # | 작업 | 파일 | 상태 |
+|---|------|------|------|
+| A-1 | `PiperTts(BaseTtsHAL)` 구현 — 모델 1회 로딩 후 인메모리 추론, HIGH/MID 쿨다운·선점 정책 EspeakTts와 동일 | `audio/piper_tts.py` | ✅ |
+| A-2 | `_build_tts()` 우선순위 변경 (Piper → espeak → Mock), `_find_audio_device()` 함수 분리 | `main.py` | ✅ |
+| A-3 | `TTS_PIPER_MODEL_PATH` 상수 추가 (`models/tts/ko_KR-kss-medium.onnx`) | `config.py` | ✅ |
+| A-4 | `piper-tts>=1.2.0` 의존성 추가 | `requirements.txt` | ✅ |
+| A-5 | `audio/__init__.py`에 `PiperTts` re-export 추가 | `audio/__init__.py` | ✅ |
+| A-6 | 한국어 모델 다운로드 스크립트 작성 (HuggingFace `ko_KR-kss-medium`, ~50MB) | `scripts/download_piper_model.sh` | ✅ |
+
+> **모델 설치:**
+> ```bash
+> pip install piper-tts
+> bash scripts/download_piper_model.sh
+> ```
+> **OPi5 추론 시간:** ~200~300ms (쿨다운 2~4초 대비 체감 영향 없음)

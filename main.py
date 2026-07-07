@@ -26,6 +26,7 @@ from audio.boot_sequence import BootSequence
 from audio.hal import BaseAudioHAL
 from audio.mock import MockAudio
 from audio.mock_tts import MockTts
+from audio.piper_tts import PiperTts
 from audio.tts import EspeakTts
 from audio.tts_hal import BaseTtsHAL
 from fusion.engine import FusionEngine, FusionResult, RiskLevel
@@ -109,18 +110,42 @@ def _build_audio(use_mock: bool, use_hw: bool) -> BaseAudioHAL:
     if use_mock or not use_hw:
         return MockAudio()
     try:
-        import sounddevice  # noqa: F401 — OSError if PortAudio lib missing
+        subprocess.run(["aplay", "--version"], capture_output=True, check=True, timeout=2)
         from audio.jack_hal import JackAudioHAL
         return JackAudioHAL()
-    except (ImportError, RuntimeError, OSError) as exc:
-        logger.warning("JackAudioHAL 초기화 실패, MockAudio fallback: %s", exc)
+    except Exception as exc:
+        logger.warning("JackAudioHAL 초기화 실패 (aplay 없음?), MockAudio fallback: %s", exc)
         return MockAudio()
 
 
 def _build_tts(use_mock: bool) -> BaseTtsHAL:
-    """환경에 맞는 TTS 컴포넌트를 생성한다."""
+    """환경에 맞는 TTS 컴포넌트를 생성한다.
+
+    우선순위: PiperTts → EspeakTts → MockTts
+
+    Args:
+        use_mock: True이면 즉시 MockTts를 반환한다.
+
+    Returns:
+        초기화된 TTS HAL 구현체.
+    """
     if use_mock:
         return MockTts()
+
+    device_idx = _find_audio_device()
+
+    # 1순위: Piper TTS — 모델 파일 존재 여부 선행 확인 (이슈 5 수정)
+    if os.path.exists(config.TTS_PIPER_MODEL_PATH):
+        try:
+            tts = PiperTts(model_path=config.TTS_PIPER_MODEL_PATH, device_idx=device_idx)
+            logger.info("PiperTts 초기화 완료 (모델: %s)", config.TTS_PIPER_MODEL_PATH)
+            return tts
+        except Exception as exc:
+            logger.warning("PiperTts 초기화 실패, EspeakTts fallback: %s", exc)
+    else:
+        logger.warning("Piper 모델 파일 없음 (%s), EspeakTts fallback", config.TTS_PIPER_MODEL_PATH)
+
+    # 2순위: espeak-ng
     try:
         subprocess.run(
             ["espeak-ng", "--version"],
@@ -128,25 +153,29 @@ def _build_tts(use_mock: bool) -> BaseTtsHAL:
             check=True,
             timeout=3,
         )
-        # JackAudioHAL과 동일한 ES8388 장치 인덱스 공유 (장치 충돌 방지)
-        device_idx = None
-        try:
-            import sounddevice as _sd
-            device_idx = next(
-                (i for i, d in enumerate(_sd.query_devices())
-                 if "es8388" in d["name"].lower() and d["max_output_channels"] > 0),
-                None,
-            )
-        except Exception:
-            pass
         return EspeakTts(device_idx=device_idx)
     except (FileNotFoundError, subprocess.CalledProcessError, OSError) as exc:
         logger.warning("espeak-ng 없음, MockTts fallback: %s", exc)
         return MockTts()
 
 
+def _find_audio_device() -> Optional[int]:
+    """오디오 출력 장치 인덱스를 반환한다.
+
+    ~/.asoundrc의 dmix 설정이 default → ES8388(hw:2,0)로 라우팅하므로 None을 반환한다.
+    None이면 sounddevice가 ALSA default를 사용해 dmix 소프트웨어 믹싱을 거친다.
+
+    Returns:
+        None (ALSA default 사용).
+    """
+    return None
+
+
+_DIR_EN: dict = {"왼쪽": "on the left", "오른쪽": "on the right", "정면": "ahead"}
+
+
 def _build_tts_text(result: FusionResult) -> Optional[str]:
-    """FusionResult에서 TTS 발화 텍스트를 생성한다.
+    """FusionResult에서 TTS 발화 텍스트를 생성한다 (영어).
 
     Returns:
         발화할 문자열. NONE 위험 수준이면 None.
@@ -155,14 +184,14 @@ def _build_tts_text(result: FusionResult) -> Optional[str]:
         return None
     if result.tof_only_mode:
         if result.risk_level == RiskLevel.HIGH:
-            return "위험, 전방 장애물"
-        return "주의, 장애물"
-    label = config.COCO_KO_LABELS.get(result.top_label or "", result.top_label or "물체")
-    direction = result.direction or "정면"
+            return "Danger! Obstacle ahead"
+        return "Caution, obstacle"
+    label = result.top_label or "obstacle"
+    direction_en = _DIR_EN.get(result.direction or "정면", "ahead")
     if result.risk_level == RiskLevel.HIGH:
         dist = round(result.distance_cm)
-        return f"위험, {direction} {dist}센티 {label}"
-    return f"{direction}에 {label}"
+        return f"Danger! {label}, {dist} centimeters, {direction_en}"
+    return f"{label} {direction_en}"
 
 
 def _put_latest(q: "queue.Queue", item: object) -> None:
@@ -523,7 +552,13 @@ class RasEyesApp:
                 if pending_system is not None and pending_system.value > result.risk_level.value
                 else result.risk_level
             )
-            if self._beep.should_beep(effective_risk) and not self._mute_active:
+            # TTS 발화 중에는 비프음을 suppresse — 두 aplay가 겹쳐 들리는 것을 방지
+            should_play_beep = (
+                self._beep.should_beep(effective_risk)
+                and not self._mute_active
+                and not self._tts.is_speaking()
+            )
+            if should_play_beep:
                 self._audio.play_alert(effective_risk)
 
             # TTS: 탐지 결과 기반 음성 알림 (비프음과 독립적으로 논블로킹 동작)

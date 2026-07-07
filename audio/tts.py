@@ -63,11 +63,16 @@ class EspeakTts(BaseTtsHAL):
         self._kill_current()
 
     def _kill_current(self) -> None:
-        """실행 중인 발화 스레드를 중단한다."""
+        """실행 중인 발화 스레드에 중단 신호를 보내고 즉시 복귀한다.
+
+        clear() 대신 새 Event를 할당하여 이전 스레드와 신규 스레드의
+        정지 신호를 격리한다 (레이스 컨디션 방지).
+        join timeout을 0.1s로 제한하여 E2E latency KPI를 보호한다.
+        """
         if self._thread is not None and self._thread.is_alive():
             self._stop_flag.set()
-            self._thread.join(timeout=1.0)
-        self._stop_flag.clear()
+            self._thread.join(timeout=0.1)
+        self._stop_flag = threading.Event()
         self._thread = None
 
     def _start_thread(self, text: str) -> None:
@@ -116,11 +121,24 @@ class EspeakTts(BaseTtsHAL):
                 pcm = wf.readframes(wf.getnframes())
                 src_rate = wf.getframerate()
             audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+            if len(audio) == 0:
+                return
             # JackAudioHAL과 동일한 샘플레이트·채널로 맞춰 ALSA 스트림 재구성 방지
             if src_rate != config.AUDIO_SAMPLE_RATE and config.AUDIO_SAMPLE_RATE % src_rate == 0:
                 audio = np.repeat(audio, config.AUDIO_SAMPLE_RATE // src_rate)
             if audio.ndim == 1:
                 audio = np.stack([audio, audio], axis=-1)  # mono → stereo
-            sd.play(audio, samplerate=config.AUDIO_SAMPLE_RATE, device=self._device_idx, blocking=True)
+            sd.play(audio, samplerate=config.AUDIO_SAMPLE_RATE, device=self._device_idx)
+            duration = len(audio) / config.AUDIO_SAMPLE_RATE
+            start_time = time.monotonic()
+            while time.monotonic() - start_time < duration:
+                if self._stop_flag.is_set():
+                    break
+                time.sleep(0.05)
         except Exception as exc:
             logger.warning("TTS 재생 실패: %s", exc)
+        finally:
+            try:
+                sd.stop()
+            except Exception:
+                pass

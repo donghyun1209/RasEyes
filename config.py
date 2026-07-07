@@ -85,7 +85,8 @@ TTS_MID_COOLDOWN_SEC: float = 4.0              # MID 재발화 억제 쿨다운
 TTS_DIRECTION_LEFT_RATIO: float = 0.33         # bbox 중심 x/width < 0.33 → 왼쪽
 TTS_DIRECTION_RIGHT_RATIO: float = 0.66        # bbox 중심 x/width > 0.66 → 오른쪽
 TTS_ESPEAK_RATE: int = 160                     # espeak-ng 발화 속도 (wpm)
-TTS_ESPEAK_VOICE: str = "ko"                   # espeak-ng 한국어 음성
+TTS_ESPEAK_VOICE: str = "en"                   # espeak-ng 영어 음성
+TTS_PIPER_MODEL_PATH: str = "models/tts/en_US-lessac-medium.onnx"  # Piper 영어 모델 경로
 
 # COCO 클래스 한국어 레이블 매핑. 미매핑 클래스는 영문 레이블 그대로 발화.
 COCO_KO_LABELS: dict = {

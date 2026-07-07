@@ -1,10 +1,13 @@
 """Phase 7 TTS 통합 테스트."""
+import sys
+import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 import config
 from audio.mock_tts import MockTts
+from audio.piper_tts import PiperTts
 from audio.tts import EspeakTts
 from fusion.engine import FusionEngine, FusionResult, RiskLevel
 from main import _build_tts_text
@@ -180,6 +183,108 @@ class TestEspeakTts:
             assert mock_start.call_count == 2
 
 
+# ── PiperTts 쿨다운 테스트 ────────────────────────────────────────────────────
+
+def _make_piper_tts() -> PiperTts:
+    """piper 라이브러리 없이 PiperTts를 생성하는 헬퍼."""
+    mock_voice = MagicMock()
+    mock_voice.config.sample_rate = 22050
+    MockPiperVoice = MagicMock()
+    MockPiperVoice.load.return_value = mock_voice
+    with patch.dict(sys.modules, {
+        "piper": MagicMock(),
+        "piper.voice": MagicMock(PiperVoice=MockPiperVoice),
+    }):
+        return PiperTts("fake.onnx")
+
+
+class TestPiperTts:
+    def test_high_cooldown_blocks_second_call(self) -> None:
+        tts = _make_piper_tts()
+        with patch.object(tts, "_start_thread") as mock_start:
+            tts.speak("첫 번째", RiskLevel.HIGH)
+            tts.speak("두 번째", RiskLevel.HIGH)  # 쿨다운 중
+            assert mock_start.call_count == 1
+
+    def test_mid_cooldown_blocks_second_call(self) -> None:
+        tts = _make_piper_tts()
+        with patch.object(tts, "_start_thread") as mock_start:
+            tts.speak("첫 번째 MID", RiskLevel.MID)
+            tts.speak("두 번째 MID", RiskLevel.MID)  # 쿨다운 중
+            assert mock_start.call_count == 1
+
+    def test_high_kills_existing_thread(self) -> None:
+        tts = _make_piper_tts()
+        with patch.object(tts, "_kill_current") as mock_kill:
+            with patch.object(tts, "_start_thread"):
+                tts._last_mid_time = 0.0
+                tts.speak("MID 텍스트", RiskLevel.MID)
+                tts._last_high_time = 0.0
+                tts.speak("HIGH 텍스트", RiskLevel.HIGH)
+                mock_kill.assert_called()
+
+    def test_mid_skips_if_thread_running(self) -> None:
+        tts = _make_piper_tts()
+        thread = MagicMock()
+        thread.is_alive.return_value = True
+        tts._thread = thread
+        tts._last_mid_time = 0.0
+        with patch.object(tts, "_start_thread") as mock_start:
+            tts.speak("MID 텍스트", RiskLevel.MID)
+            mock_start.assert_not_called()
+
+    def test_stop_kills_thread(self) -> None:
+        tts = _make_piper_tts()
+        with patch.object(tts, "_kill_current") as mock_kill:
+            tts.stop()
+            mock_kill.assert_called_once()
+
+    def test_stop_when_no_thread(self) -> None:
+        tts = _make_piper_tts()
+        tts.stop()  # 예외 발생 없어야 함
+
+    def test_high_after_cooldown_speaks(self) -> None:
+        tts = _make_piper_tts()
+        with patch.object(tts, "_start_thread") as mock_start:
+            tts.speak("첫 번째", RiskLevel.HIGH)
+            tts._last_high_time = 0.0  # 쿨다운 만료
+            tts.speak("두 번째", RiskLevel.HIGH)
+            assert mock_start.call_count == 2
+
+    def test_speak_worker_aborts_on_stop_flag_during_synthesis(self) -> None:
+        tts = _make_piper_tts()
+        stop_flag = threading.Event()
+
+        def slow_synthesize(_text):
+            stop_flag.set()  # 합성 도중 선점 신호
+            yield b"\x00\x00" * 100
+
+        tts._voice.synthesize_stream_raw = slow_synthesize
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 0
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+            tts._speak_worker("테스트", stop_flag)
+        mock_popen.assert_not_called()  # 합성 중단 → aplay 호출 없어야 함
+
+    def test_speak_worker_stops_playback_on_stop_flag(self) -> None:
+        tts = _make_piper_tts()
+        stop_flag = threading.Event()
+        tts._voice.synthesize_stream_raw.return_value = iter([b"\x00\x00" * 22050])
+
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None  # 재생 중
+
+        def set_flag_and_none():
+            stop_flag.set()
+            return None
+
+        mock_proc.poll.side_effect = set_flag_and_none
+
+        with patch("subprocess.Popen", return_value=mock_proc):
+            tts._speak_worker("테스트", stop_flag)
+        mock_proc.kill.assert_called_once()  # kill() 사용으로 변경
+
+
 # ── _build_tts_text() 테스트 ──────────────────────────────────────────────────
 
 class TestBuildTtsText:
@@ -189,34 +294,34 @@ class TestBuildTtsText:
 
     def test_tof_only_high(self) -> None:
         result = FusionResult(RiskLevel.HIGH, 80.0, tof_only_mode=True)
-        assert _build_tts_text(result) == "위험, 전방 장애물"
+        assert _build_tts_text(result) == "Danger! Obstacle ahead"
 
     def test_tof_only_mid(self) -> None:
         result = FusionResult(RiskLevel.MID, 130.0, tof_only_mode=True)
-        assert _build_tts_text(result) == "주의, 장애물"
+        assert _build_tts_text(result) == "Caution, obstacle"
 
-    def test_high_detection_korean_label(self) -> None:
+    def test_high_detection_label(self) -> None:
         result = FusionResult(
             RiskLevel.HIGH, 80.0, tof_only_mode=False,
             top_label="person", direction="정면",
         )
-        assert _build_tts_text(result) == "위험, 정면 80센티 사람"
+        assert _build_tts_text(result) == "Danger! person, 80 centimeters, ahead"
 
-    def test_mid_detection_korean_label(self) -> None:
+    def test_mid_detection_label(self) -> None:
         result = FusionResult(
             RiskLevel.MID, 130.0, tof_only_mode=False,
             top_label="chair", direction="왼쪽",
         )
-        assert _build_tts_text(result) == "왼쪽에 의자"
+        assert _build_tts_text(result) == "chair on the left"
 
     def test_high_right_direction(self) -> None:
         result = FusionResult(
             RiskLevel.HIGH, 95.0, tof_only_mode=False,
             top_label="car", direction="오른쪽",
         )
-        assert _build_tts_text(result) == "위험, 오른쪽 95센티 자동차"
+        assert _build_tts_text(result) == "Danger! car, 95 centimeters, on the right"
 
-    def test_unknown_label_fallback_to_english(self) -> None:
+    def test_unknown_label_in_text(self) -> None:
         result = FusionResult(
             RiskLevel.HIGH, 80.0, tof_only_mode=False,
             top_label="unknown_item", direction="정면",
@@ -232,8 +337,8 @@ class TestBuildTtsText:
         )
         text = _build_tts_text(result)
         assert text is not None
-        assert "위험" in text
-        assert "정면" in text
+        assert "Danger" in text
+        assert "ahead" in text
 
     def test_no_direction_uses_default(self) -> None:
         result = FusionResult(
@@ -242,7 +347,7 @@ class TestBuildTtsText:
         )
         text = _build_tts_text(result)
         assert text is not None
-        assert "정면" in text
+        assert "ahead" in text
 
     def test_distance_rounded(self) -> None:
         result = FusionResult(
@@ -250,4 +355,4 @@ class TestBuildTtsText:
             top_label="person", direction="정면",
         )
         text = _build_tts_text(result)
-        assert "83센티" in text
+        assert "83 centimeters" in text

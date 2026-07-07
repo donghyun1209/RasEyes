@@ -8,28 +8,28 @@ import config
 
 logger = logging.getLogger(__name__)
 
-_DEBOUNCE_SEC = 0.05   # 50ms 디바운싱
-_POLL_INTERVAL_SEC = 0.02   # 20ms 폴링 주기
+_DEBOUNCE_SEC = 0.05
+_POLL_INTERVAL_SEC = 0.02
 
 
 class ButtonHandler:
     """GPIO 핀에 연결된 물리 버튼 이벤트 핸들러.
 
-    gpiod 라이브러리를 lazy import하므로 PC에서도 임포트 오류 없이 사용 가능.
+    gpiod 2.x API 기반. lazy import이므로 PC에서도 임포트 오류 없이 사용 가능.
     on_press 콜백에서 mute 토글, 앱 종료 등 원하는 동작을 구현한다.
 
     Args:
-        pin: 감지할 GPIO 핀 번호 (BCM 기준).
-        chip_name: gpiod 칩 이름 (Orange Pi 5 기본값: "gpiochip1").
+        pin: 감지할 GPIO 핀 번호 (gpiochip 내 offset).
+        chip_path: gpiod 칩 장치 경로 (gpiod 2.x는 전체 경로 필요).
     """
 
     def __init__(
         self,
         pin: int = config.GPIO_BUTTON_PIN,
-        chip_name: str = "gpiochip1",
+        chip_path: str = "/dev/gpiochip1",
     ) -> None:
         self._pin = pin
-        self._chip_name = chip_name
+        self._chip_path = chip_path
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -58,41 +58,42 @@ class ButtonHandler:
             name="button-handler",
         )
         self._thread.start()
-        logger.info("ButtonHandler 시작 (pin=%d, chip=%s)", self._pin, self._chip_name)
+        logger.info("ButtonHandler 시작 (pin=%d, chip=%s)", self._pin, self._chip_path)
 
     def _poll_loop(self, on_press: Callable[[], None], gpiod) -> None:
-        """버튼 상태를 폴링하며 눌림을 감지한다."""
-        chip = None
-        line = None
+        """버튼 상태를 폴링하며 눌림을 감지한다 (gpiod 2.x API)."""
+        request = None
         try:
             try:
-                chip = gpiod.Chip(self._chip_name)
-                line = chip.get_line(self._pin)
-                line.request(consumer="raseyes-button", type=gpiod.LINE_REQ_DIR_IN)
+                request = gpiod.request_lines(
+                    self._chip_path,
+                    consumer="raseyes-button",
+                    config={self._pin: gpiod.LineSettings(
+                        direction=gpiod.line.Direction.INPUT,
+                    )},
+                )
             except Exception as exc:
                 logger.error("ButtonHandler GPIO 초기화 실패: %s", exc)
-                if chip is not None:
-                    chip.close()
                 return
 
-            prev_value = 1  # 풀업 저항 기본값 HIGH
+            # 풀업 저항 기본값: HIGH(ACTIVE). 눌리면 LOW(INACTIVE) — falling edge 감지.
+            prev_high = True
             while not self._stop_event.is_set():
-                value = line.get_value()
-                if prev_value == 1 and value == 0:  # falling edge (눌림)
+                value = request.get_value(self._pin)
+                is_high = (value == gpiod.line.Value.ACTIVE)
+                if prev_high and not is_high:  # falling edge (눌림)
                     time.sleep(_DEBOUNCE_SEC)
-                    if line.get_value() == 0:       # 디바운싱 후 재확인
+                    if request.get_value(self._pin) != gpiod.line.Value.ACTIVE:
                         logger.debug("버튼 누름 감지 (pin=%d)", self._pin)
                         try:
                             on_press()
                         except Exception as exc:
                             logger.warning("on_press 콜백 오류: %s", exc)
-                prev_value = value
+                prev_high = is_high
                 time.sleep(_POLL_INTERVAL_SEC)
         finally:
-            if line is not None:
-                line.release()
-            if chip is not None:
-                chip.close()
+            if request is not None:
+                request.release()
 
     def stop(self) -> None:
         """폴링 스레드를 중단한다."""

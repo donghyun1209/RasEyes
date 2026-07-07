@@ -26,3 +26,7 @@ class BaseTtsHAL(ABC):
     def stop(self) -> None:
         """진행 중인 발화를 중단하고 리소스를 해제한다."""
         ...
+
+    def is_speaking(self) -> bool:
+        """현재 발화 중이면 True를 반환한다. 기본값은 False."""
+        return False

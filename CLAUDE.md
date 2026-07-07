@@ -39,3 +39,10 @@
 ## 6. Environment Variables
 * `RASEYES_MOCK=1`: 모든 컴포넌트를 Mock으로 교체 (카메라·모델 불필요). 개발 기본값.
 * `RASEYES_HW=1`: Orange Pi 5 HW HAL 사용. 초기화 실패 시 자동 fallback.
+
+## 7. Audio Threading Rules
+* **오디오 재생:** `sd.play(blocking=False)` + 50ms 폴링 루프 + `finally: sd.stop()` 패턴 필수. `blocking=True` 사용 금지 (스레드 선점 불가).
+* **스레드 정지 플래그:** `_stop_flag.clear()` 사용 금지. 선점 시 `self._stop_flag = threading.Event()` 로 새 인스턴스 교체 (레이스 컨디션 방지).
+* **TTS 스택:** PiperTts (모델: `models/tts/ko_KR-kss-medium.onnx`) → EspeakTts → MockTts 우선순위. 모델 설치: `bash scripts/download_piper_model.sh`.
+* **미설치 라이브러리 테스트:** PC에 `sounddevice`, `piper` 미설치. 테스트에서 `patch.dict(sys.modules, {"sounddevice": MagicMock(), ...})` 사용.
+* **외부 모델 초기화:** 모델 파일이 필요한 클래스 생성 전 반드시 `os.path.exists(path)` 선행 확인 후 fallback 처리.

@@ -1,12 +1,16 @@
 """PiperTts — piper-tts 기반 비동기 TTS 구현체."""
 import logging
-import subprocess
 import threading
 import time
+from collections import OrderedDict
 from typing import Optional
 
+import numpy as np
+
 import config
-from audio.tts_hal import BaseTtsHAL
+from audio.interface import BaseTtsHAL
+from audio.prerendered_tts import load_prerendered_cache
+from audio.resident_stream import ResidentAudioStream
 from fusion.engine import RiskLevel
 
 logger = logging.getLogger(__name__)
@@ -44,6 +48,24 @@ try:
 except Exception as patch_err:
     logger.warning("piper-tts pygoruut 몽키 패치 적용 실패/스킵 (pip 미설치 등): %s", patch_err)
 
+# --- ONNX Runtime CPU 스레드 제한 몽키 패치 (보조배터리 OCP 방지) ---
+# PiperVoice.load()가 onnxruntime.SessionOptions()를 옵션 없이 생성해 모든 CPU 코어를
+# 사용하므로, 순간 전류 스파이크를 막기 위해 생성자를 감싸 스레드 수를 강제한다.
+try:
+    import onnxruntime
+
+    _OriginalSessionOptions = onnxruntime.SessionOptions
+
+    class _ThreadLimitedSessionOptions(_OriginalSessionOptions):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.intra_op_num_threads = config.TTS_ONNX_INTRA_OP_THREADS
+            self.inter_op_num_threads = config.TTS_ONNX_INTER_OP_THREADS
+
+    onnxruntime.SessionOptions = _ThreadLimitedSessionOptions
+except Exception as patch_err:
+    logger.warning("onnxruntime 스레드 제한 패치 적용 실패/스킵 (pip 미설치 등): %s", patch_err)
+
 
 class PiperTts(BaseTtsHAL):
     """piper-tts 신경망 TTS 구현체.
@@ -64,9 +86,12 @@ class PiperTts(BaseTtsHAL):
         self._device_idx = device_idx
         self._thread: Optional[threading.Thread] = None
         self._stop_flag = threading.Event()
-        self._current_proc: Optional[subprocess.Popen] = None
         self._last_high_time: float = 0.0
         self._last_mid_time: float = 0.0
+        self._pcm_cache: "OrderedDict[str, bytes]" = OrderedDict()
+        self._prerendered_cache = load_prerendered_cache(self._voice.config.sample_rate)
+        self._stream = ResidentAudioStream(self._voice.config.sample_rate, device=device_idx)
+        self._stream.start()
 
     def speak(self, text: str, risk_level: RiskLevel = RiskLevel.HIGH) -> None:
         """텍스트를 비동기로 발화한다.
@@ -94,17 +119,19 @@ class PiperTts(BaseTtsHAL):
     def stop(self) -> None:
         """진행 중인 발화를 중단하고 리소스를 해제한다."""
         self._kill_current()
+        self._stream.stop()
 
     def is_speaking(self) -> bool:
-        """현재 발화 스레드가 실행 중이면 True를 반환한다."""
-        return self._thread is not None and self._thread.is_alive()
+        """합성 중이거나 상주 스트림이 재생 중이면 True를 반환한다."""
+        return (self._thread is not None and self._thread.is_alive()) or self._stream.is_playing()
 
     def _kill_current(self) -> None:
-        """실행 중인 발화 스레드와 aplay 프로세스를 즉시 종료한다.
+        """진행 중인 합성/재생을 즉시 중단시킨다.
 
-        stop_flag를 세팅하고 current_proc을 SIGKILL로 즉시 종료한다.
-        proc.kill()은 blocking write 중인 스레드에서 BrokenPipeError를 유발하여
-        스레드를 빠르게 깨운다. 이후 join(0.5s)으로 종료를 확인한다.
+        stop_flag를 세팅해 합성 루프가 이를 감지하도록 하고, 상주 스트림
+        버퍼는 clear()로 즉시 비워 재생 중인 오디오를 끊는다. 재생 자체는
+        스레드가 아닌 상주 스트림 콜백이 담당하므로 join은 합성 스레드
+        종료 확인 용도로만 짧게 사용한다.
 
         clear() 대신 새 Event를 할당하여 이전/신규 스레드의 stop 신호를 격리한다.
         단, _speak_worker는 stop_flag를 self가 아닌 인자로 받으므로 교체 후에도
@@ -112,11 +139,8 @@ class PiperTts(BaseTtsHAL):
         """
         if self._thread is not None and self._thread.is_alive():
             self._stop_flag.set()
-            proc = self._current_proc
-            if proc is not None and proc.poll() is None:
-                proc.kill()  # SIGKILL — 즉시 종료
             self._thread.join(timeout=0.5)
-        self._current_proc = None
+        self._stream.clear()
         self._stop_flag = threading.Event()
         self._thread = None
 
@@ -139,56 +163,58 @@ class PiperTts(BaseTtsHAL):
         self._thread.start()
 
     def _speak_worker(self, text: str, stop_flag: threading.Event) -> None:
-        """Piper로 PCM을 합성하고 aplay subprocess로 재생한다.
+        """Piper로 PCM을 합성(또는 캐시 재사용)하고 상주 오디오 스트림으로 재생한다.
+
+        config.TTS_PRERENDERED_PHRASES에 속한 고정 문구는 scripts/prerender_tts_cache.py로
+        미리 렌더링된 WAV를 그대로 사용해 합성 자체를 건너뛴다. 그 외 문자열이
+        반복 발화되는 경우 신경망 추론을 다시 수행하지 않도록 합성 결과를
+        인메모리 LRU 캐시에 저장해 재사용한다.
 
         Args:
             text: 발화할 문자열.
             stop_flag: 이 스레드 전용 정지 플래그 (self._stop_flag와 독립).
         """
-        # 합성 중 선점 신호 감지
-        try:
-            pcm_chunks = []
-            if hasattr(self._voice, "synthesize_stream_raw"):
-                for chunk in self._voice.synthesize_stream_raw(text):
-                    if stop_flag.is_set():
-                        return
-                    pcm_chunks.append(chunk)
-            else:
-                for chunk in self._voice.synthesize(text):
-                    if stop_flag.is_set():
-                        return
-                    if hasattr(chunk, "audio_int16_bytes"):
-                        pcm_chunks.append(chunk.audio_int16_bytes)
-                    else:
-                        pcm_chunks.append(chunk)
-            pcm_bytes = b"".join(pcm_chunks)
-        except Exception as exc:
-            logger.warning("Piper TTS 추론 실패: %s", exc)
-            return
-
-        if stop_flag.is_set():
-            return
-
-        # aplay subprocess — ALSA dmix와 완전 호환
-        # _current_proc을 write() 전에 저장해야 _kill_current()가 blocking write를 강제 종료할 수 있다.
-        try:
-            sample_rate = self._voice.config.sample_rate
-            proc = subprocess.Popen(
-                ["aplay", "-D", "default", "-f", "S16_LE",
-                 "-r", str(sample_rate), "-c", "1", "--quiet"],
-                stdin=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-            )
-            self._current_proc = proc
+        prerendered_pcm = self._prerendered_cache.get(text)
+        cached_pcm = self._pcm_cache.get(text)
+        if prerendered_pcm is not None:
+            pcm_bytes = prerendered_pcm
+        elif cached_pcm is not None:
+            self._pcm_cache.move_to_end(text)
+            pcm_bytes = cached_pcm
+        else:
+            # 합성 중 선점 신호 감지
             try:
-                proc.stdin.write(pcm_bytes)
-                proc.stdin.close()
-            except BrokenPipeError:
-                return  # _kill_current()가 proc를 kill해서 파이프 종료
-            while proc.poll() is None:
-                if stop_flag.is_set():
-                    proc.kill()
-                    break
-                time.sleep(0.05)
-        except Exception as exc:
-            logger.warning("TTS 재생 실패: %s", exc)
+                pcm_chunks = []
+                if hasattr(self._voice, "synthesize_stream_raw"):
+                    for chunk in self._voice.synthesize_stream_raw(text):
+                        if stop_flag.is_set():
+                            return
+                        pcm_chunks.append(chunk)
+                else:
+                    for chunk in self._voice.synthesize(text):
+                        if stop_flag.is_set():
+                            return
+                        if hasattr(chunk, "audio_int16_bytes"):
+                            pcm_chunks.append(chunk.audio_int16_bytes)
+                        else:
+                            pcm_chunks.append(chunk)
+                pcm_bytes = b"".join(pcm_chunks)
+            except Exception as exc:
+                logger.warning("Piper TTS 추론 실패: %s", exc)
+                return
+
+            if stop_flag.is_set() or not pcm_bytes:
+                return
+
+            self._pcm_cache[text] = pcm_bytes
+            if len(self._pcm_cache) > config.TTS_PCM_CACHE_MAX_ENTRIES:
+                self._pcm_cache.popitem(last=False)
+
+        if stop_flag.is_set() or not pcm_bytes:
+            return
+
+        # 상주 오디오 스트림(ResidentAudioStream) 버퍼에 채워 넣는다 — 매 발화마다
+        # ALSA 디바이스를 열고 닫지 않으므로 즉시 반환하며 별도 폴링이 필요 없다.
+        audio = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+        stereo = np.stack([audio, audio], axis=-1)
+        self._stream.play(stereo, interrupt=True)

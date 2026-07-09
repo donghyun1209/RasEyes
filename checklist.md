@@ -8,7 +8,7 @@
 ## 시작 전 확인
 
 - [ ] Orange Pi 전원 인가 후 이어폰 꽂기
-- [ ] 부팅 완료 신호: **삐~비~빅 + "라스아이즈 준비 완료"** 음성 들리는지
+- [ ] 부팅 완료 신호: **삐~비~빅 + "RasEyes ready"** 음성 들리는지
 - [ ] 카메라 방향: 가슴~머리 높이 정면을 커버하는지
 
 ---
@@ -18,13 +18,13 @@
 | # | 확인 항목 | 기대 결과 | 결과 |
 |---|-----------|-----------|------|
 | A-1 | 부팅 멜로디 (MID→MID→HIGH 비프) | 이어폰에서 삐~비~빅 들림 | |
-| A-2 | "라스아이즈 준비 완료" 음성 | 멜로디 직후 한국어 음성 들림 | |
+| A-2 | "RasEyes ready" 음성 | 멜로디 직후 영어 음성 들림 | |
 | A-3 | HIGH 경보음 (2000Hz) | 100cm 이내 장애물 시 빠른 비프 | |
 | A-4 | MID 경보음 (1000Hz) | 150cm 이내 장애물 시 느린 비프 | |
-| A-5 | TTS 음성 — HIGH | `"위험, 정면 80센티 사람"` 형식 | |
-| A-6 | TTS 음성 — MID | `"왼쪽에 의자"` 형식 | |
-| A-7 | TTS 음성 — ToF 단독 HIGH | `"위험, 전방 장애물"` | |
-| A-8 | TTS 음성 — ToF 단독 MID | `"주의, 장애물"` | |
+| A-5 | TTS 음성 — HIGH | `"Danger! person, 80 centimeters, ahead"` 형식 | |
+| A-6 | TTS 음성 — MID | `"chair on the left"` 형식 | |
+| A-7 | TTS 음성 — ToF 단독 HIGH | `"Danger! Obstacle ahead"` | |
+| A-8 | TTS 음성 — ToF 단독 MID | `"Caution, obstacle"` | |
 
 ---
 
@@ -32,9 +32,9 @@
 
 | # | 테스트 조건 | 기대 TTS | 결과 |
 |---|-------------|----------|------|
-| B-1 | 장애물이 정면 (카메라 중앙) | `"정면에 사람"` | |
-| B-2 | 장애물이 왼쪽 (bbox 중심 x < 33%) | `"왼쪽에 사람"` | |
-| B-3 | 장애물이 오른쪽 (bbox 중심 x > 66%) | `"오른쪽에 사람"` | |
+| B-1 | 장애물이 정면 (카메라 중앙) | `"person ahead"` | |
+| B-2 | 장애물이 왼쪽 (bbox 중심 x < 33%) | `"person on the left"` | |
+| B-3 | 장애물이 오른쪽 (bbox 중심 x > 66%) | `"person on the right"` | |
 
 ---
 
@@ -53,7 +53,7 @@
 
 | # | 테스트 조건 | 기대 결과 | 결과 |
 |---|-------------|-----------|------|
-| D-1 | 어두운 방 (Confidence < 0.4) | ToF 단독 모드 전환, TTS `"위험, 전방 장애물"` | |
+| D-1 | 어두운 방 (Confidence < 0.4) | ToF 단독 모드 전환, TTS `"Danger! Obstacle ahead"` | |
 | D-2 | 장애물 없는 정지 상태 | 경보 없음 (오탐지 없는지) | |
 | D-3 | 문틀 통과 | 통과 중 경보 없거나 1회 이내 | |
 | D-4 | 카메라 손으로 가림 | 짧은 3연속 비프 (삑삑삑) | |
@@ -85,13 +85,13 @@
 
 ---
 
-  ### 1. 한국어로 매핑되어 안내되는 주요 물체 (26종)                                                                                                                                     
-                                                                                                                                                                                         
-  config.py의  COCO_KO_LABELS 에 정의된 물체들입니다. 테스트 시 이 물체들을 카메라에 비추면 한국어로 즉시 안내를 받으실 수 있습니다.                                                
-  
-  • 보행/이동체:  사람  (person),  자전거  (bicycle),  자동차  (car),  오토바이  (motorcycle),  버스  (bus),  트럭  (truck)
-  • 안전/안내 시설:  신호등  (traffic light),  소화전  (fire hydrant),  정지 표지판  (stop sign),  벤치  (bench)
-  • 반려동물/동물:  고양이  (cat),  강아지  (dog),  새  (bird)
-  • 휴대물품:  가방  (backpack),  우산  (umbrella),  핸드백  (handbag),  캐리어  (suitcase)
-  • 식기/가구/가전:  병  (bottle),  컵  (cup),  의자  (chair),  소파  (couch),  테이블  (dining table),  화장실  (toilet),  텔레비전  (tv),  노트북  (laptop)
-  • 건물 구성:  문  (door)
+  ### 1. TTS로 안내되는 주요 물체 (26종)
+
+  YOLOv8 COCO 클래스 중 fusion 대상 라벨입니다. 영어 TTS 전환 이후 번역 없이 COCO 영문 명칭 그대로 발화됩니다 (예: "person", "chair").
+
+  • 보행/이동체:  person,  bicycle,  car,  motorcycle,  bus,  truck
+  • 안전/안내 시설:  traffic light,  fire hydrant,  stop sign,  bench
+  • 반려동물/동물:  cat,  dog,  bird
+  • 휴대물품:  backpack,  umbrella,  handbag,  suitcase
+  • 식기/가구/가전:  bottle,  cup,  chair,  couch,  dining table,  toilet,  tv,  laptop
+  • 건물 구성:  door

@@ -19,7 +19,7 @@ from typing import Optional
 import numpy as np
 
 import config
-from vision.detector import YoloDetector
+from vision.yolo_detector_hal import YoloDetector
 from vision.mock_camera import MockCamera
 
 

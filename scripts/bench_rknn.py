@@ -66,7 +66,7 @@ def run_benchmark(model_path: str, frames: int) -> RknnBenchResult:
 
     try:
         from vision.csi_camera_hal import CSICameraHAL
-        from vision.rknn_detector import RknnDetector
+        from vision.rknn_detector_hal import RknnDetector
     except ImportError as exc:
         raise SystemExit(f"필수 패키지 미설치: {exc}") from exc
 

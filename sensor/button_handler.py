@@ -1,7 +1,7 @@
 """물리 버튼 GPIO 이벤트 핸들러 (Orange Pi 5)."""
+import datetime
 import logging
 import threading
-import time
 from typing import Callable, Optional
 
 import config
@@ -9,7 +9,7 @@ import config
 logger = logging.getLogger(__name__)
 
 _DEBOUNCE_SEC = 0.05
-_POLL_INTERVAL_SEC = 0.02
+_STOP_CHECK_TIMEOUT_SEC = 0.5  # wait_edge_events 블로킹 대기 상한 (stop_event 확인 주기)
 
 
 class ButtonHandler:
@@ -26,7 +26,7 @@ class ButtonHandler:
     def __init__(
         self,
         pin: int = config.GPIO_BUTTON_PIN,
-        chip_path: str = "/dev/gpiochip1",
+        chip_path: str = config.GPIO_CHIP_PATH,
     ) -> None:
         self._pin = pin
         self._chip_path = chip_path
@@ -61,7 +61,12 @@ class ButtonHandler:
         logger.info("ButtonHandler 시작 (pin=%d, chip=%s)", self._pin, self._chip_path)
 
     def _poll_loop(self, on_press: Callable[[], None], gpiod) -> None:
-        """버튼 상태를 폴링하며 눌림을 감지한다 (gpiod 2.x API)."""
+        """버튼 눌림을 커널 edge 이벤트로 감지한다 (gpiod 2.x API).
+
+        busy-wait 폴링 대신 wait_edge_events()로 블로킹 대기하여, 버튼이
+        눌리지 않는 대기 상황에서 CPU가 깊은 저전력 상태에 진입할 수 있게 한다.
+        디바운스는 커널(debounce_period)에 위임한다.
+        """
         request = None
         try:
             try:
@@ -70,27 +75,25 @@ class ButtonHandler:
                     consumer="raseyes-button",
                     config={self._pin: gpiod.LineSettings(
                         direction=gpiod.line.Direction.INPUT,
+                        edge_detection=gpiod.line.Edge.FALLING,
+                        debounce_period=datetime.timedelta(seconds=_DEBOUNCE_SEC),
                     )},
                 )
             except Exception as exc:
                 logger.error("ButtonHandler GPIO 초기화 실패: %s", exc)
                 return
 
-            # 풀업 저항 기본값: HIGH(ACTIVE). 눌리면 LOW(INACTIVE) — falling edge 감지.
-            prev_high = True
+            timeout = datetime.timedelta(seconds=_STOP_CHECK_TIMEOUT_SEC)
             while not self._stop_event.is_set():
-                value = request.get_value(self._pin)
-                is_high = (value == gpiod.line.Value.ACTIVE)
-                if prev_high and not is_high:  # falling edge (눌림)
-                    time.sleep(_DEBOUNCE_SEC)
-                    if request.get_value(self._pin) != gpiod.line.Value.ACTIVE:
+                if not request.wait_edge_events(timeout):
+                    continue  # 타임아웃 — stop_event 재확인
+                for event in request.read_edge_events():
+                    if event.event_type == gpiod.EdgeEvent.Type.FALLING_EDGE:
                         logger.debug("버튼 누름 감지 (pin=%d)", self._pin)
                         try:
                             on_press()
                         except Exception as exc:
                             logger.warning("on_press 콜백 오류: %s", exc)
-                prev_high = is_high
-                time.sleep(_POLL_INTERVAL_SEC)
         finally:
             if request is not None:
                 request.release()

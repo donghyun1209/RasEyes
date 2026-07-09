@@ -10,7 +10,8 @@ from typing import Optional
 import numpy as np
 
 import config
-from audio.tts_hal import BaseTtsHAL
+from audio.interface import BaseTtsHAL
+from audio.resident_stream import ResidentAudioStream
 from fusion.engine import RiskLevel
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,8 @@ class EspeakTts(BaseTtsHAL):
         self._stop_flag = threading.Event()
         self._last_high_time: float = 0.0
         self._last_mid_time: float = 0.0
+        self._stream = ResidentAudioStream(config.AUDIO_SAMPLE_RATE, device=device_idx)
+        self._stream.start()
 
     def speak(self, text: str, risk_level: RiskLevel = RiskLevel.HIGH) -> None:
         """텍스트를 비동기로 발화한다.
@@ -61,38 +64,40 @@ class EspeakTts(BaseTtsHAL):
     def stop(self) -> None:
         """진행 중인 발화를 중단하고 리소스를 해제한다."""
         self._kill_current()
+        self._stream.stop()
+
+    def is_speaking(self) -> bool:
+        """합성 중이거나 상주 스트림이 재생 중이면 True를 반환한다."""
+        return (self._thread is not None and self._thread.is_alive()) or self._stream.is_playing()
 
     def _kill_current(self) -> None:
-        """실행 중인 발화 스레드에 중단 신호를 보내고 즉시 복귀한다.
+        """진행 중인 합성/재생에 중단 신호를 보내고 즉시 복귀한다.
 
         clear() 대신 새 Event를 할당하여 이전 스레드와 신규 스레드의
-        정지 신호를 격리한다 (레이스 컨디션 방지).
+        정지 신호를 격리한다 (레이스 컨디션 방지). 상주 스트림 버퍼는
+        clear()로 즉시 비워 재생 중인 오디오를 끊는다.
         join timeout을 0.1s로 제한하여 E2E latency KPI를 보호한다.
         """
         if self._thread is not None and self._thread.is_alive():
             self._stop_flag.set()
             self._thread.join(timeout=0.1)
+        self._stream.clear()
         self._stop_flag = threading.Event()
         self._thread = None
 
     def _start_thread(self, text: str) -> None:
         """발화 스레드를 비동기로 시작한다."""
+        stop_flag = self._stop_flag  # 현재 Event 캡처 — 교체 후에도 유효
         self._thread = threading.Thread(
             target=self._speak_worker,
-            args=(text,),
+            args=(text, stop_flag),
             daemon=True,
             name="tts-worker",
         )
         self._thread.start()
 
-    def _speak_worker(self, text: str) -> None:
-        """espeak-ng --stdout으로 WAV를 생성하고 sounddevice로 재생한다."""
-        try:
-            import sounddevice as sd
-        except ImportError:
-            logger.warning("sounddevice 미설치 — TTS 재생 불가")
-            return
-
+    def _speak_worker(self, text: str, stop_flag: threading.Event) -> None:
+        """espeak-ng --stdout으로 WAV를 생성하고 상주 오디오 스트림으로 재생한다."""
         try:
             result = subprocess.run(
                 [
@@ -113,7 +118,7 @@ class EspeakTts(BaseTtsHAL):
             logger.warning("espeak-ng 비정상 종료 (rc=%d)", result.returncode)
             return
 
-        if self._stop_flag.is_set():
+        if stop_flag.is_set():
             return
 
         try:
@@ -128,17 +133,8 @@ class EspeakTts(BaseTtsHAL):
                 audio = np.repeat(audio, config.AUDIO_SAMPLE_RATE // src_rate)
             if audio.ndim == 1:
                 audio = np.stack([audio, audio], axis=-1)  # mono → stereo
-            sd.play(audio, samplerate=config.AUDIO_SAMPLE_RATE, device=self._device_idx)
-            duration = len(audio) / config.AUDIO_SAMPLE_RATE
-            start_time = time.monotonic()
-            while time.monotonic() - start_time < duration:
-                if self._stop_flag.is_set():
-                    break
-                time.sleep(0.05)
+            if stop_flag.is_set():
+                return
+            self._stream.play(audio, interrupt=True)
         except Exception as exc:
             logger.warning("TTS 재생 실패: %s", exc)
-        finally:
-            try:
-                sd.stop()
-            except Exception:
-                pass

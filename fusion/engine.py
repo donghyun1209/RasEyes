@@ -102,7 +102,7 @@ class FusionEngine:
             return FusionResult(risk, filtered_dist, tof_only_mode=True)
 
         if detections:
-            if filtered_dist <= config.HIGH_RISK_DIST_CM and max_conf >= effective_min_conf:
+            if filtered_dist <= config.HIGH_RISK_DIST_CM:
                 return FusionResult(
                     RiskLevel.HIGH, filtered_dist, tof_only_mode=False,
                     top_label=top_label, direction=direction,

@@ -2,7 +2,7 @@
 import logging
 from typing import Optional
 
-from audio.tts_hal import BaseTtsHAL
+from audio.interface import BaseTtsHAL
 from fusion.engine import RiskLevel
 
 logger = logging.getLogger(__name__)

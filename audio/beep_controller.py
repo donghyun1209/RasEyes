@@ -33,7 +33,11 @@ class BeepController:
             self._pending_system_alert = risk_level
 
     def pop_system_alert(self) -> Optional[RiskLevel]:
-        """대기 중인 시스템 경고를 반환하고 초기화한다."""
+        """대기 중인 시스템 경고를 반환하고 초기화한다.
+
+        Returns:
+            대기 중이던 위험 수준. 없으면 None.
+        """
         alert = self._pending_system_alert
         self._pending_system_alert = None
         return alert

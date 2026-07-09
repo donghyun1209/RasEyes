@@ -23,6 +23,7 @@ class CsvLogger:
         self._path = path
         self._file = None
         self._writer: Optional[csv.DictWriter] = None
+        self._unflushed_rows = 0
 
     def open(self) -> None:
         """CSV 파일을 열고 헤더를 작성한다. 중간 디렉터리가 없으면 자동 생성한다.
@@ -73,12 +74,17 @@ class CsvLogger:
                 "tts_spoken": tts_spoken,
             }
         )
-        self._file.flush()
+        self._unflushed_rows += 1
+        if self._unflushed_rows >= config.LOG_FLUSH_INTERVAL_ROWS:
+            self._file.flush()
+            self._unflushed_rows = 0
 
     def close(self) -> None:
-        """CSV 파일을 닫는다."""
+        """버퍼링된 행을 디스크에 반영하고 CSV 파일을 닫는다."""
         if self._file is not None:
+            self._file.flush()
             self._file.close()
             self._file = None
             self._writer = None
+            self._unflushed_rows = 0
             logger.info("CsvLogger 종료: %s", self._path)

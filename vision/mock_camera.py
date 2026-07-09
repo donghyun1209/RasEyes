@@ -7,7 +7,7 @@ from typing import List, Union
 import numpy as np
 
 import config
-from vision.hal import BaseCameraHAL
+from vision.interface import BaseCameraHAL
 
 
 class MockCamera(BaseCameraHAL):
@@ -64,6 +64,7 @@ class MockCamera(BaseCameraHAL):
         return frame
 
     def stop(self) -> None:
+        """카메라를 정지하고 로드된 프레임을 해제한다."""
         self._running = False
         self._frames = []
         self._index = 0
@@ -75,6 +76,15 @@ class MockCamera(BaseCameraHAL):
 
     # ------------------------------------------------------------------
     def _load_frames(self) -> List[np.ndarray]:
+        """source 설정에 맞춰 프레임 목록을 로드한다.
+
+        Returns:
+            로드된 BGR 프레임 목록. source가 None이면 요청 해상도의 빈 프레임 1장.
+
+        Raises:
+            ImportError: 파일 소스 사용 시 opencv-python이 없을 때.
+            FileNotFoundError: 지정된 이미지 파일이 존재하지 않을 때.
+        """
         if self._source is None:
             return [np.zeros((self._height, self._width, 3), dtype=np.uint8)]
 
@@ -96,5 +106,9 @@ class MockCamera(BaseCameraHAL):
             img = cv2.imread(str(path))
             if img is None:
                 raise FileNotFoundError(f"이미지 파일을 찾을 수 없습니다: {path}")
+            if img.shape[1] != self._width or img.shape[0] != self._height:
+                img = cv2.resize(
+                    img, (self._width, self._height), interpolation=cv2.INTER_NEAREST
+                )
             frames.append(img)
         return frames

@@ -5,7 +5,7 @@ import cv2
 import numpy as np
 
 import config
-from vision.hal import BaseCameraHAL
+from vision.interface import BaseCameraHAL
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,7 @@ class OpenCVCamera(BaseCameraHAL):
             raise RuntimeError(
                 f"카메라 장치를 열 수 없습니다 (device_index={self._device_index})"
             )
-        self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        self._cap.set(cv2.CAP_PROP_BUFFERSIZE, config.CAMERA_BUFFER_SIZE)
         self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._width)
         self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._height)
         self._cap.set(cv2.CAP_PROP_FPS, self._fps)

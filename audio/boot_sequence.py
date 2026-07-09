@@ -1,17 +1,16 @@
 """부팅 완료 오디오 큐 (Orange Pi 5)."""
 import logging
 import time
-from typing import Optional
+from typing import List, Optional, Tuple
 
 import config
-from audio.hal import BaseAudioHAL
-from audio.tts_hal import BaseTtsHAL
+from audio.interface import BaseAudioHAL, BaseTtsHAL
 from fusion.engine import RiskLevel
 
 logger = logging.getLogger(__name__)
 
 # MID → MID → HIGH 순서의 상승 멜로디로 준비 완료를 알림
-_BOOT_MELODY = [
+_BOOT_MELODY: List[Tuple[RiskLevel, float]] = [
     (RiskLevel.MID, 0.15),
     (RiskLevel.MID, 0.15),
     (RiskLevel.HIGH, 0.0),
@@ -25,7 +24,7 @@ class BootSequence:
     """
 
     def play(self, audio_hal: BaseAudioHAL, tts: Optional[BaseTtsHAL] = None) -> None:
-        """'RasEyes 준비 완료' 상승 멜로디를 재생하고 선택적으로 TTS 발화한다.
+        """'RasEyes ready' 상승 멜로디를 재생하고 선택적으로 TTS 발화한다.
 
         Args:
             audio_hal: start()가 완료된 BaseAudioHAL 구현체.
@@ -39,4 +38,4 @@ class BootSequence:
         # 마지막 비프(non-blocking)가 끝날 때까지 대기 후 TTS 시작
         time.sleep(config.AUDIO_BEEP_DURATION_MS / 1000.0 + 0.05)
         if tts is not None:
-            tts.speak("라스아이즈 준비 완료", RiskLevel.HIGH)
+            tts.speak("RasEyes ready", RiskLevel.HIGH)

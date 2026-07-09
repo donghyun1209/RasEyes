@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 
 import config
-from vision.rknn_detector import RknnDetector
+from vision.rknn_detector_hal import RknnDetector
 from vision.mock_camera import MockCamera
 
 

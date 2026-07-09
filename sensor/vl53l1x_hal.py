@@ -1,9 +1,11 @@
 """VL53L1X ToF 센서 HAL 구현체 (Orange Pi 5, i2c-5)."""
 import logging
 import threading
+import time
+from typing import Optional
 
 import config
-from sensor.hal import BaseToFHAL
+from sensor.interface import BaseToFHAL
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,10 @@ class VL53L1XHAL(BaseToFHAL):
         self._inter_measurement_ms = inter_measurement_ms
         self._tof = None
         self._running = False
+        self._lock = threading.Lock()
+        self._latest_distance_mm: Optional[int] = None
+        self._latest_update_ts: float = 0.0
+        self._poll_thread: Optional[threading.Thread] = None
 
     def start(self) -> None:
         """센서를 초기화하고 측정을 시작한다.
@@ -70,7 +76,7 @@ class VL53L1XHAL(BaseToFHAL):
             self._tof.set_timing(
                 self._timing_budget_us, self._inter_measurement_ms
             )
-            self._tof.start_ranging(2)  # 2 = MEDIUM (최대 3m, 200ms+ 타이밍 버짓 필요)
+            self._tof.start_ranging(config.TOF_RANGING_MODE_MEDIUM)
         except Exception as exc:
             if self._tof is not None:
                 try:
@@ -81,6 +87,10 @@ class VL53L1XHAL(BaseToFHAL):
             raise RuntimeError(f"VL53L1X 초기화 실패: {exc}") from exc
 
         self._running = True
+        self._poll_thread = threading.Thread(
+            target=self._poll_loop, daemon=True, name="tof-poll"
+        )
+        self._poll_thread.start()
         logger.info(
             "VL53L1XHAL 시작 (i2c-%d, timing=%dµs, interval=%dms)",
             self._i2c_port,
@@ -88,45 +98,62 @@ class VL53L1XHAL(BaseToFHAL):
             self._inter_measurement_ms,
         )
 
-    def read_distance_cm(self) -> float:
-        """현재 거리 측정값을 cm 단위로 반환한다.
+    def _poll_loop(self) -> None:
+        """단일 상주 스레드에서 센서 값을 지속적으로 읽어 최신값을 갱신한다.
 
-        get_distance()가 하드웨어 이슈로 무한 블로킹하는 경우를 방지하기 위해
-        1초 timeout을 적용한다. timeout 시 RuntimeError를 발생시켜 워커가 재시도한다.
+        매 호출마다 스레드를 새로 생성하던 기존 방식은 I2C 버스 락업 시
+        스레드가 영원히 반환되지 않아 초당 15개씩 누적되는 Thread Leak을
+        유발했다. 상주 스레드 1개만 블로킹시키고, read_distance_cm()은
+        공유 변수의 최신값만 즉시 반환하도록 분리한다.
+        """
+        while self._running:
+            try:
+                distance_mm = self._tof.get_distance()
+                with self._lock:
+                    self._latest_distance_mm = distance_mm
+                    self._latest_update_ts = time.monotonic()
+                time.sleep(config.TOF_POLL_INTERVAL_SEC)
+            except Exception as exc:
+                logger.warning("ToF 폴링 오류 (무시하고 계속): %s", exc)
+                time.sleep(config.TOF_POLL_INTERVAL_SEC)
+
+    def read_distance_cm(self) -> float:
+        """가장 최근에 폴링된 거리 측정값을 cm 단위로 반환한다.
+
+        백그라운드 폴링 스레드가 갱신하는 공유 변수를 즉시 반환하므로
+        블로킹이 없다. 값이 1초 이상 갱신되지 않으면 센서 무응답으로 간주한다.
 
         Returns:
             측정된 거리 (cm). 범위 초과 시 TOF_OUT_OF_RANGE_CM.
 
         Raises:
-            RuntimeError: start() 미호출 또는 get_distance() timeout 시.
+            RuntimeError: start() 미호출 또는 1초 이상 값 갱신이 없을 시.
         """
         if not self._running or self._tof is None:
             raise RuntimeError("start()를 먼저 호출하세요.")
 
-        result: list = [None]
+        with self._lock:
+            distance_mm = self._latest_distance_mm
+            update_ts = self._latest_update_ts
 
-        def _read() -> None:
-            result[0] = self._tof.get_distance()
+        if distance_mm is None or time.monotonic() - update_ts > config.TOF_STALE_TIMEOUT_SEC:
+            raise RuntimeError("ToF 센서 1초 이상 무응답")
 
-        t = threading.Thread(target=_read, daemon=True)
-        t.start()
-        t.join(timeout=1.0)
-        if result[0] is None:
-            raise RuntimeError("get_distance() 1초 timeout — 센서 무응답")
-
-        distance_mm = result[0]
         if distance_mm == 0:
             return config.TOF_OUT_OF_RANGE_CM
         return distance_mm / 10.0  # mm → cm
 
     def stop(self) -> None:
         """측정을 중단하고 센서 리소스를 해제한다."""
-        if self._tof is not None and self._running:
+        self._running = False
+        if self._poll_thread is not None:
+            self._poll_thread.join(timeout=1.0)
+            self._poll_thread = None
+        if self._tof is not None:
             try:
                 self._tof.stop_ranging()
                 self._tof.close()
             except Exception as exc:
                 logger.warning("VL53L1XHAL 정리 중 오류 (무시): %s", exc)
             self._tof = None
-        self._running = False
         logger.info("VL53L1XHAL 종료")

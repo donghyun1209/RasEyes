@@ -45,7 +45,7 @@ RasEyes/
 ├── vision/
 │   ├── interface.py          # VisionInterface HAL 추상 클래스
 │   ├── hal.py                # BaseCameraHAL 추상 클래스
-│   ├── detector.py           # YoloDetector (YOLOv8 Nano + MPS)
+│   ├── yolo_detector_hal.py  # YoloDetector (YOLOv8 Nano + MPS)
 │   ├── opencv_camera.py      # OpenCVCamera — 실제 웹캠 HAL 구현체
 │   ├── mock.py               # MockVision — PC 테스트용 Mock 구현체
 │   └── mock_camera.py        # MockCamera — 빈 프레임 / 이미지 순환

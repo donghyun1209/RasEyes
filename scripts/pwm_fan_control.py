@@ -14,20 +14,24 @@ import signal
 import sys
 import time
 from pathlib import Path
+from types import FrameType
+from typing import List, Optional, Tuple
+
+import config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 # PWM sysfs 경로 (Orange Pi 5 pwmchip0, channel 0)
-_PWM_CHIP_PATH = Path("/sys/class/pwm/pwmchip0")
-_PWM_CHANNEL_PATH = _PWM_CHIP_PATH / "pwm0"
-_CPU_TEMP_PATH = Path("/sys/class/thermal/thermal_zone0/temp")
+_PWM_CHIP_PATH: Path = Path("/sys/class/pwm/pwmchip0")
+_PWM_CHANNEL_PATH: Path = _PWM_CHIP_PATH / "pwm0"
+_CPU_TEMP_PATH: Path = Path(config.CPU_TEMP_SYSFS_PATH)
 
-_PERIOD_NS = 25_000  # 40kHz PWM (25µs 주기)
-_CHECK_INTERVAL_SEC = 5.0
+_PERIOD_NS: int = 25_000  # 40kHz PWM (25µs 주기)
+_CHECK_INTERVAL_SEC: float = 5.0
 
 # 온도-듀티 매핑 테이블: (온도°C, 듀티 비율 0.0~1.0)
-_TEMP_DUTY_TABLE = [
+_TEMP_DUTY_TABLE: List[Tuple[float, float]] = [
     (50.0, 0.20),
     (70.0, 0.80),
     (80.0, 1.00),
@@ -100,7 +104,7 @@ def main() -> None:
     if not _pwm_init():
         sys.exit(1)
 
-    def _on_signal(signum, frame):
+    def _on_signal(signum: int, frame: Optional[FrameType]) -> None:
         logger.info("종료 신호 수신, PWM 비활성화")
         _pwm_disable()
         sys.exit(0)

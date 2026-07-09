@@ -97,7 +97,7 @@ class TestThermalThrottle:
         call_times = []
         original_sleep = time.sleep
 
-        def capture_sleep(secs):
+        def capture_sleep(secs: float) -> None:
             call_times.append(secs)
 
         # _vision_worker 내 throttle 슬립 로직만 직접 검증
@@ -109,7 +109,7 @@ class TestThermalThrottle:
 # ── 5-3: 카메라 가림 감지 ──────────────────────────────────────────────
 
 class TestCameraOcclusion:
-    def _make_frame(self, value: int = 128, shape=(480, 640, 3)):
+    def _make_frame(self, value: int = 128, shape: tuple[int, int, int] = (480, 640, 3)) -> np.ndarray:
         """지정 밝기의 단색 프레임을 생성한다."""
         return np.full(shape, value, dtype=np.uint8)
 

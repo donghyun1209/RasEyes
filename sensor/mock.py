@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import List, Union
 
-from sensor.hal import BaseToFHAL
+from sensor.interface import BaseToFHAL
 
 
 class MockToFSensor(BaseToFHAL):
@@ -38,6 +38,7 @@ class MockToFSensor(BaseToFHAL):
         self._running: bool = False
 
     def start(self) -> None:
+        """ToF 센서를 시작 상태로 전환한다."""
         self._running = True
 
     def read_distance_cm(self) -> float:
@@ -75,4 +76,5 @@ class MockToFSensor(BaseToFHAL):
         self._index = 0
 
     def stop(self) -> None:
+        """ToF 센서를 정지 상태로 전환한다."""
         self._running = False

@@ -5,8 +5,7 @@ from typing import List, Optional
 import numpy as np
 
 import config
-from vision.hal import BaseCameraHAL
-from vision.interface import DetectionResult, VisionInterface
+from vision.interface import BaseCameraHAL, DetectionResult, VisionInterface
 
 logger = logging.getLogger(__name__)
 

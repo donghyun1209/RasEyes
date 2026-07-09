@@ -6,18 +6,17 @@ import cv2
 import numpy as np
 
 import config
-from vision.hal import BaseCameraHAL
-from vision.interface import DetectionResult, VisionInterface
+from vision.interface import BaseCameraHAL, DetectionResult, VisionInterface
 
 logger = logging.getLogger(__name__)
 
 # YOLOv8n RKNN 출력 텐서 레이아웃
-_RKNN_INPUT_SIZE = 640          # 정사각형 입력
-_RKNN_NUM_CLASSES = 80          # COCO 클래스 수
-_NMS_IOU_THRESHOLD = 0.45
+_RKNN_INPUT_SIZE: int = 640          # 정사각형 입력
+_RKNN_NUM_CLASSES: int = 80          # COCO 클래스 수
+_NMS_IOU_THRESHOLD: float = 0.45
 
 # COCO 80개 클래스 이름 (인덱스 = class_id)
-_COCO_CLASSES = [
+_COCO_CLASSES: List[str] = [
     "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train",
     "truck", "boat", "traffic light", "fire hydrant", "stop sign",
     "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep",
@@ -90,7 +89,8 @@ class RknnDetector(VisionInterface):
                 f"RKNN 모델 로드 실패 (ret={ret}): {self._model_path}"
             )
 
-        ret = self._rknn.init_runtime(core_mask=RKNNLite.NPU_CORE_0_1)
+        core_mask = getattr(RKNNLite, config.RKNN_CORE_MASK)
+        ret = self._rknn.init_runtime(core_mask=core_mask)
         if ret != 0:
             self._rknn.release()
             self._rknn = None
@@ -126,7 +126,7 @@ class RknnDetector(VisionInterface):
         detections = self._postprocess(outputs)
         return frame, detections
 
-    def _postprocess(self, outputs) -> List[DetectionResult]:
+    def _postprocess(self, outputs: Optional[List[np.ndarray]]) -> List[DetectionResult]:
         """YOLOv8 RKNN 출력 텐서를 DetectionResult 목록으로 변환한다.
 
         출력 텐서 레이아웃: (1, 84, 8400)

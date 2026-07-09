@@ -2,7 +2,7 @@
 
 시각장애인의 상단 사각지대(가슴~머리 높이) 장애물을 실시간으로 탐지하는 웨어러블 엣지 AI 디바이스.
 
-흰지팡이가 감지하지 못하는 간판·나뭇가지·트럭 적재함 등의 충돌 위험을 카메라 비전 AI와 ToF 거리 센서로 탐지하고, 골전도 이어폰을 통해 즉각적인 청각 피드백을 제공합니다.
+흰지팡이가 감지하지 못하는 간판·나뭇가지·트럭 적재함 등의 충돌 위험을 카메라 비전 AI와 ToF 거리 센서로 탐지하고, 3.5mm 이어폰 잭을 통해 비프음과 음성(TTS)으로 즉각적인 청각 피드백을 제공합니다.
 
 ---
 
@@ -20,18 +20,18 @@
 ## 시스템 구조
 
 ```
-Camera ──► Vision Module (YOLOv8 Nano)  ──┐
-                                            ├──► Fusion Engine ──► Audio Feedback
-ToF    ──► Distance Filter (이동평균)     ──┘         │
-                                                    └──► CSV Logger
+Camera ──► Vision Module (YOLOv8 Nano)    ──┐
+                                              ├──► Fusion Engine ──► Audio Feedback (비프음 + TTS)
+ToF    ──► Distance Filter (이동평균)       ──┘         │
+                                                      └──► CSV Logger
 ```
 
 **센서 퓨전 판단 로직**
 
 | 조건 | 위험 등급 | 동작 |
 |------|-----------|------|
-| 객체 탐지 & 거리 ≤ 100cm & Confidence ≥ 0.4 | High Risk | 즉각 경고음 (200ms 주기) |
-| 객체 탐지 & 거리 ≤ 150cm | Mid Risk | 주의 경고음 (500ms 주기) |
+| 객체 탐지 & 거리 ≤ 100cm & Confidence ≥ 0.4 | High Risk | 즉각 경고음 (200ms 주기) + TTS |
+| 객체 탐지 & 거리 ≤ 150cm | Mid Risk | 주의 경고음 (500ms 주기) + TTS |
 | Confidence < 0.4 (저조도) | Fallback | ToF 단독 모드 전환 |
 
 ---
@@ -40,45 +40,47 @@ ToF    ──► Distance Filter (이동평균)     ──┘         │
 
 ```
 RasEyes/
-├── main.py                   # 오케스트레이션 (파이프라인 연결·스레드 조정)
-├── config.py                 # 전역 상수 및 임계값
+├── main.py                     # 오케스트레이션 (파이프라인 연결·스레드 조정)
+├── config.py                   # 전역 상수 및 임계값
 ├── vision/
-│   ├── interface.py          # VisionInterface HAL 추상 클래스
-│   ├── hal.py                # BaseCameraHAL 추상 클래스
-│   ├── yolo_detector_hal.py  # YoloDetector (YOLOv8 Nano + MPS)
-│   ├── opencv_camera.py      # OpenCVCamera — 실제 웹캠 HAL 구현체
-│   ├── mock.py               # MockVision — PC 테스트용 Mock 구현체
-│   └── mock_camera.py        # MockCamera — 빈 프레임 / 이미지 순환
+│   ├── interface.py            # VisionInterface / BaseCameraHAL 추상 클래스
+│   ├── csi_camera_hal.py       # CSICameraHAL — Orange Pi 5 MIPI CSI 카메라 (OV13855)
+│   ├── opencv_camera.py        # OpenCVCamera — 일반 USB 웹캠 HAL 구현체
+│   ├── rknn_detector_hal.py    # RknnDetector — YOLOv8 Nano RKNN NPU 추론
+│   ├── yolo_detector_hal.py    # YoloDetector — YOLOv8 Nano CPU 추론 (PC 검증용)
+│   ├── mock.py                 # MockVision — PC 테스트용 Mock 구현체
+│   └── mock_camera.py          # MockCamera — 빈 프레임 / 이미지 순환
 ├── sensor/
-│   ├── hal.py                # BaseToFHAL 추상 클래스
-│   ├── filters.py            # MovingAverageFilter (window=3)
-│   └── mock.py               # MockToFSensor — 고정값·시퀀스 지원
+│   ├── interface.py            # BaseToFHAL 추상 클래스
+│   ├── vl53l1x_hal.py          # VL53L1XHAL — 실제 ToF 센서 (I2C)
+│   ├── filters.py              # MovingAverageFilter (window=3)
+│   ├── button_handler.py       # ButtonHandler — 물리 버튼(음소거 토글) GPIO 입력
+│   └── mock.py                 # MockToFSensor — 고정값·시퀀스 지원
 ├── fusion/
-│   └── engine.py             # FusionEngine (퓨전 로직 + reset_filter)
+│   └── engine.py                # FusionEngine (퓨전 로직 + reset_filter)
 ├── audio/
-│   ├── hal.py                # BaseAudioHAL 추상 클래스
-│   ├── beep_controller.py    # BeepController — 쿨다운 기반 경보 제어
-│   └── mock.py               # MockAudio — 콘솔 경보 시뮬레이션
+│   ├── interface.py             # BaseAudioHAL / BaseTtsHAL 추상 클래스
+│   ├── jack_hal.py              # JackAudioHAL — 3.5mm 잭 비프음 출력 (ALSA)
+│   ├── resident_stream.py       # ResidentAudioStream — 상주 오디오 스트림 (전류 스파이크 방지)
+│   ├── piper_tts.py             # PiperTts — 신경망 TTS (1순위)
+│   ├── tts.py                   # EspeakTts — espeak-ng 기반 TTS (fallback)
+│   ├── prerendered_tts.py       # 고정 경고 문구 사전 렌더링 캐시 로더
+│   ├── beep_controller.py       # BeepController — 쿨다운 기반 경보 주기 제어
+│   ├── boot_sequence.py         # 부팅 멜로디 + 안내 음성 재생
+│   └── mock.py / mock_tts.py    # MockAudio / MockTts — PC 테스트용 Mock 구현체
 ├── logs/
-│   └── logger.py             # CsvLogger — 1초 1회 CSV 기록
-└── tests/
-    ├── test_fusion.py        # 거리 경계·Fallback·신뢰도 케이스
-    ├── test_sensor.py        # 이동평균 필터·MockToFSensor
-    ├── test_audio.py         # BeepController·MockAudio
-    ├── test_logger.py        # CsvLogger 스키마·기록 검증
-    ├── test_vision.py        # MockVision·MockCamera 동작 검증
-    ├── test_fps_fallback.py  # FPS Fallback 통합 테스트
-    ├── test_longevity.py     # 장기 안정성 (메모리 누수 검증)
-    └── benchmark_vision.py   # YoloDetector KPI 벤치마크
+│   └── logger.py                # CsvLogger — 1초 1회 CSV 기록
+├── scripts/                     # RKNN 모델 변환, 벤치마크, TTS 모델/캐시 준비 유틸
+└── tests/                       # pytest 스위트 (150개 케이스)
 ```
 
-HAL(Hardware Abstraction Layer) 인터페이스를 통해 현재 PC Mock 구현체와 추후 RPi 하드웨어 구현체를 코드 변경 없이 교체할 수 있습니다.
+HAL(Hardware Abstraction Layer) 인터페이스를 통해 PC Mock 구현체와 Orange Pi 5 하드웨어 구현체를 코드 변경 없이 교체할 수 있습니다.
 
 ---
 
 ## 개발 환경 설정
 
-**요구 사항:** Python 3.11, macOS (Apple Silicon 권장)
+**개발 PC 요구 사항:** Python 3.13, Linux/macOS (GPU 가속 불필요 — CPU로 개발/검증, 실제 추론은 Orange Pi 5 NPU에서 수행)
 
 ```bash
 # 1. 저장소 클론
@@ -86,7 +88,7 @@ git clone https://github.com/donghyun1209/RasEyes.git
 cd RasEyes
 
 # 2. 가상환경 생성 및 활성화
-python3.11 -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 
 # 3. 의존성 설치
@@ -98,28 +100,34 @@ pip install -r requirements.txt
 ## 실행
 
 ```bash
-# Mock 모드로 전체 파이프라인 실행
+# Mock 모드 — 카메라·모델 없이 전체 파이프라인 실행
+RASEYES_MOCK=1 python main.py
+
+# 기본 실행 — 실제 카메라·모델 필요
 python main.py
+
+# Orange Pi 5 HW HAL 사용 (배포 환경, 초기화 실패 시 자동 fallback)
+RASEYES_HW=1 python main.py
 ```
 
-실행 시 `logs/raseyes_log.csv`에 1초 1회 상태가 기록됩니다.
+실행 시 `logs/raseyes_log.csv`에 1초 1회 상태(timestamp, cpu_temp, fps, tof_distance_cm, alert_triggered)가 기록됩니다.
 
 ---
 
 ## 테스트
 
 ```bash
-# 전체 테스트 실행 (현재 72개 통과)
+# 전체 테스트 실행 (현재 150개 통과)
 pytest
 
 # 커버리지 포함
 pytest --cov=. --cov-report=term-missing
 
-# YoloDetector KPI 벤치마크 (ultralytics 필요)
-python -m tests.benchmark_vision --frames 100
+# 퓨전 로직 단위 테스트만
+pytest tests/test_fusion.py
 ```
 
-핵심 테스트 케이스: 거리 임계값 경계 조건, Low-light Fallback 전환, FPS Fallback 통합, 이동평균 필터 노이즈 평활화
+핵심 테스트 케이스: 거리 임계값 경계 조건, Low-light Fallback 전환, FPS Fallback 통합, 이동평균 필터 노이즈 평활화, TTS 선점/쿨다운 로직.
 
 ---
 
@@ -127,12 +135,12 @@ python -m tests.benchmark_vision --frames 100
 
 | 구성 요소 | 사양 |
 |-----------|------|
-| 컴퓨트 | Raspberry Pi 5 (8GB) |
-| 스토리지 | NVMe SSD 128GB (PCIe HAT) |
-| 카메라 | Camera Module 3 |
+| 컴퓨트 | Orange Pi 5 (4GB, RK3588S + NPU) |
+| 카메라 | OV13855 MIPI CSI 카메라 |
 | 거리 센서 | VL53L1X (ToF, I2C) |
-| 오디오 출력 | 블루투스 골전도 이어폰 + GPIO 비상 부저 |
-| AI 모델 | YOLOv8 Nano (TFLite INT8 양자화) |
+| 오디오 출력 | 3.5mm 이어폰 잭 (ES8388 코덱, ALSA) |
+| AI 모델 | YOLOv8 Nano (RKNN INT8 양자화, NPU 추론) |
+| 부가 입력 | 물리 버튼 (GPIO, 음소거 토글) |
 
 100% On-device 처리 — 외부 API 및 클라우드 연동 없음.
 
@@ -144,10 +152,11 @@ python -m tests.benchmark_vision --frames 100
 |-------|------|------|
 | 0 | 프로젝트 기반 구축 | ✅ 완료 |
 | 1 | PC Mock 파이프라인 완성 | ✅ 완료 |
-| 2 | YOLOv8 + MPS 비전 AI 통합 | ✅ 완료 |
+| 2 | YOLOv8 비전 AI 통합 | ✅ 완료 |
 | 3 | pytest 테스트 스위트 구축 | ✅ 완료 |
-| 4 | RPi 5 하드웨어 이식 | 🔲 예정 |
-| 5 | 시스템 최적화 및 안정화 | 🔲 예정 |
-| 6 | PoC 베타 테스트 | 🔲 예정 |
+| 4 | Orange Pi 5 하드웨어 이식 | ✅ 완료 |
+| 5 | 시스템 최적화 및 안정화 | ✅ 완료 |
+| 6 | PoC 검증 및 베타 테스트 | 🔄 진행 중 |
+| 7 | TTS 통합 (카메라 정보 음성 전달) | ✅ 완료 |
 
-자세한 내용은 [ROADMAP.md](ROADMAP.md)를 참고하세요.
+자세한 내용은 [ROADMAP.md](ROADMAP.md), 개발 규칙/배포 절차는 [CLAUDE.md](CLAUDE.md)를 참고하세요.

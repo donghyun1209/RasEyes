@@ -1,130 +1,50 @@
-# 2026-07-07 작업 내용
+# 2026-07-09 작업 내용
 
-## TTS 품질 개선 — espeak-ng → Piper TTS 전환
+## 1. feedback.txt 코드 리뷰 반영
 
 ### 배경
-espeak-ng 특유의 로봇 음성 품질 문제와 메시지가 정돈되지 않은 느낌을 해결하기 위해
-신경망 기반 Piper TTS로 전환.
-
-### 신규 파일
-| 파일 | 내용 |
-|------|------|
-| `audio/piper_tts.py` | PiperTts 구현체 (BaseTtsHAL 상속) |
-| `scripts/download_piper_model.sh` | 모델 다운로드 스크립트 |
+외부 코드 리뷰(`feedback.txt`)로 지적된 항목을 Explore 서브에이전트 3개로 실제 코드와 대조 검증한 뒤 수정. 이미 해결된 항목(`MockTts.stop`, `main.py`의 6개 함수 docstring)은 재작업하지 않고 스킵.
 
 ### 수정 파일
 | 파일 | 내용 |
 |------|------|
-| `audio/__init__.py` | PiperTts re-export 추가 |
-| `audio/tts.py` | non-blocking 재생 + finally + 레이스 컨디션 수정 |
-| `config.py` | `TTS_PIPER_MODEL_PATH` 상수 추가 |
-| `main.py` | `_build_tts()` 우선순위 변경, `_find_audio_device()` 분리 |
-| `requirements.txt` | `piper-tts>=1.2.0` 추가 |
-| `requirements-rpi.txt` | `piper-tts>=1.2.0` 추가 |
-| `tests/test_tts.py` | TestPiperTts 9개 케이스 추가 |
-| `CLAUDE.md` | Section 7 Audio Threading Rules 추가 |
-| `ROADMAP.md` | 추가 구현 사항 섹션에 Piper TTS 전환 기록 |
+| `audio/tts.py` | `EspeakTts` 선점 레이스 컨디션 수정 — `stop_flag`를 로컬 변수로 캡처해 워커 스레드에 인자로 전달 (`piper_tts.py`와 동일 패턴) |
+| `vision/mock_camera.py` | 로드된 이미지를 요청 해상도로 `cv2.resize` (실제 카메라 HAL과 동작 일치) |
+| `fusion/engine.py` | `evaluate()`의 중복 조건(`and max_conf >= effective_min_conf`) 제거 |
+| `config.py`, `sensor/vl53l1x_hal.py`, `vision/csi_camera_hal.py`, `vision/opencv_camera.py` | 하드웨어 매직넘버를 config 상수로 이전 (`TOF_RANGING_MODE_MEDIUM`, `TOF_STALE_TIMEOUT_SEC`, `CAMERA_BUFFER_SIZE`) |
+| `vision/mock.py`, `sensor/mock.py`, `vision/mock_camera.py`, `audio/mock.py`, `audio/beep_controller.py` | 누락된 Google 스타일 docstring 보완 |
+| `tests/test_tts.py`, `tests/test_phase5.py` | 누락된 타입 힌트 추가 |
 
-### 코드 리뷰 피드백 반영 (3라운드)
+### 의도적으로 스킵 (Simplicity First)
+- HAL 파일명(`interface.py`/`hal.py`/`mock.py`) 강제 통일 — 현재 구체적 파일명(`csi_camera_hal.py` 등)이 더 명확
+- 순수 수학 변환 상수(`/10.0` mm→cm, `/32768.0` int16 정규화) config.py 이전 — 튜닝 대상 아닌 고정값
+- `EspeakTts`의 `np.repeat` 리샘플링을 scipy로 교체 — 새 의존성 부담 대비 실사용 문제 미확인
 
-**1차:**
-- `sd.play(blocking=True)` → non-blocking + 50ms 폴링 루프로 교체
-- 합성 루프 내 `_stop_flag` 조기 중단 적용
-- TestPiperTts 단위 테스트 추가
-- `requirements-rpi.txt` 누락 반영
-- `os.path.exists()` 모델 파일 선행 검사 추가
-- Google-style Docstring 보완
+검증: `pytest` 150개 전체 통과, `RASEYES_MOCK=1 python main.py` 정상 기동 확인.
 
-**2차:**
-- `_kill_current` join timeout 1.0s → 0.1s (E2E latency 보호)
-- `finally: sd.stop()` 으로 장치 해제 보장
-- 빈 오디오 배열 (`len(audio) == 0`) 방어 코드 추가
+## 2. Orange Pi 5 배포
 
-**3차:**
-- `_stop_flag.clear()` → `self._stop_flag = threading.Event()` 교체 (레이스 컨디션 근본 수정) — piper_tts.py, tts.py 모두 적용
-- EspeakTts `_speak_worker`도 동일한 non-blocking + finally 패턴으로 통일
+### 배경
+로컬 작업 트리(HAL 리팩터, `ResidentAudioStream` 도입, prerendered TTS 캐시 등 대규모 미커밋 변경 포함)를 Orange Pi 5에 배포. Pi가 git 기반이 아니라 애드혹 파일 복사로 운영되어 왔고(git 4커밋 지연 + untracked 잔재 파일 다수) 실행 중인 서비스가 있다는 것을 확인, rsync 기반의 안전한 배포 절차로 진행.
 
-### 최종 테스트 결과
-```
-134 passed in 6.28s
-```
+### 절차
+1. Pi 전체 디렉터리 tar 백업 → `.deploy_backup/20260709_102731/`
+2. `rsync -avz --delete`로 로컬 작업 트리 동기화 (`.git`/`.venv`/`models`/`logs/*.csv`/`*.md` 등 제외 — Pi에서 별도 편집된 문서 보호)
+3. 잘못된 위치의 잔재 파일 정리 (`main.py.bak`, 루트의 `jack_hal.py`/`download_piper_model.sh` 등)
+4. `models/tts/prerendered/` 신규 캐시 별도 동기화
+5. `python3 -c 'import main'`으로 import 정상 여부 확인 후 `raseyes.service` 재시작
 
-### 설치 방법 (OPi5 포함)
-```bash
-pip install piper-tts
-bash scripts/download_piper_model.sh
-python main.py
-```
+### 배포 후 확인
+- 카메라(CSI)/ToF(VL53L1X)/NPU(RKNN)/오디오 파이프라인 전부 정상 기동, 사람/물체 인식 정상 동작
+- 카메라 가림 경고가 반복적으로 울림 → 조사 결과 고정 거치 상태에서 정적인 장면을 계속 봐서 발생하는 알려진 설계 한계로 확인 (배포 회귀 아님, 사용자 요청으로 임계값 조정은 보류)
+- 재시작 직후 오디오 믹서 검증 실패/언더런 경고 → 기동 과도 현상으로 확인, 재발 없음
+- **보조배터리 단독 구동 테스트 통과**
 
----
+## 3. Git 커밋 & CLAUDE.md 정비
 
-## Orange Pi 5 배포 버그 수정 — 오디오 동시 재생 및 TTS 언어 변경
-
-### 문제
-1. **TTS 여러 목소리 동시 재생** — 장애물 감지 시 이전 발화가 끊기지 않고 겹쳐 들림
-2. **비프음 + TTS 동시 재생** — 경보음과 음성이 동시에 출력되어 알아들을 수 없음
-3. **한국어 TTS 품질 불량** — pygoruut 음소 변환 오류로 알아들을 수 없는 음성 출력
-
-### 원인 분석
-
-**버그 1 — stop_flag 교체 레이스 컨디션 (근본 원인)**
-`_kill_current()`에서 `self._stop_flag = threading.Event()`로 교체 시,
-이전 스레드가 새 Event를 참조 → `is_set()` == False → 종료 안 됨 → 두 aplay 동시 실행.
-
-**버그 2 — PortAudio/ALSA 동시 접근 충돌**
-`JackAudioHAL`이 `sounddevice.OutputStream`을 사용해 비프음을 재생하면서
-PiperTts의 `aplay`와 동시에 ES8388 ALSA 장치에 접근 → 충돌 및 겹침.
-
-**버그 3 — 한국어 모델 품질**
-`ko_KR-kss-medium` 모델의 pygoruut 음소 변환 품질 문제.
-
-### 수정 내용
-
-#### `audio/piper_tts.py`
-- `_start_thread()`: `stop_flag`를 생성 시점에 로컬 캡처하여 인자로 전달
-  (`args=(text, stop_flag)`) → 스레드가 자신의 Event만 참조 (교체 영향 없음)
-- `_kill_current()`: `self._current_proc`에 aplay proc 저장 → `proc.kill()` (SIGKILL)으로
-  blocking `stdin.write()` 중인 스레드도 즉시 강제 종료. join timeout 0.5s로 증가
-- `_speak_worker()`: `finally: self._current_proc = None` 제거 (새 스레드 proc를 덮어쓰는 버그)
-- `is_speaking()` 메서드 추가
-- `import numpy` 제거 (미사용)
-
-#### `audio/jack_hal.py`
-- `sounddevice.OutputStream` 완전 제거 → `aplay` subprocess로 전환
-- float32 파형을 S16_LE int16으로 변환 후 aplay에 파이프
-- sounddevice 의존성 제거, `start()`가 PortAudio 초기화 없이 동작
-
-#### `audio/tts_hal.py`
-- `is_speaking() -> bool` 기본 메서드 추가 (기본값 False)
-
-#### `main.py`
-- `_build_audio()`: `sounddevice` import 체크 → `aplay --version` 체크로 변경
-- `_run_loop()`: TTS 발화 중에는 비프음 suppress
-  (`not self._tts.is_speaking()` 조건 추가)
-- `_build_tts_text()`: 영어 메시지로 전환
-  - HIGH: `"Danger! {label}, {dist} centimeters, {direction}"`
-  - MID: `"{label} {direction}"`
-  - ToF only HIGH: `"Danger! Obstacle ahead"`
-  - ToF only MID: `"Caution, obstacle"`
-
-#### `config.py`
-- `TTS_ESPEAK_VOICE`: `"ko"` → `"en"`
-- `TTS_PIPER_MODEL_PATH`: `ko_KR-kss-medium.onnx` → `en_US-lessac-medium.onnx`
-
-#### `scripts/download_piper_model.sh`
-- 다운로드 대상: `en_US-lessac-medium` (rhasspy/piper-voices, HuggingFace)
-
-#### `tests/test_tts.py`
-- `threading` import 추가
-- `test_speak_worker_*`: `stop_flag`를 명시적으로 생성해 인자로 전달
-- `TestBuildTtsText`: 영어 출력 기준으로 전체 갱신
-
-### 최종 테스트 결과
-```
-42 passed in 0.17s
-```
-
-### Orange Pi 5 배포 결과
-- PiperTts 초기화: `en_US-lessac-medium.onnx` 로드 성공
-- 오디오 출력: 비프음(aplay) + TTS(aplay) 모두 dmix 경유, 동시 재생 없음
-- TTS 발화 예시: `"Danger! person, 80 centimeters, ahead"`
+- 커밋 `912de18`: "HAL 인터페이스 통일, 상주 오디오 스트림 도입, feedback.txt 리뷰 반영" (40개 파일, push는 미실행)
+- `CLAUDE.md`에 "8. Orange Pi 5 배포" 섹션 신설: rsync 배포 절차, `raseyes.service`가 시스템 `/usr/bin/python3`로 직접 실행된다는 점, `sudo` 재시작은 대화형 비밀번호 때문에 Claude가 직접 실행 불가하다는 제약, 안전 종료 명령어
+- `/claude-md-improver`로 품질 감사(78/100) 후 3건 수정:
+  - §4 "Apple Silicon MPS 가속" → 실제 dev 머신(Linux x86_64)과 불일치하던 오류 정정
+  - Commands 표에 `requirements-rpi.txt` 설치 명령 추가
+  - `PRD.md`/`TRD.md`/`ROADMAP.md`/`ToDayWork.md`/`checklist.md` 문서 링크를 §1에 추가

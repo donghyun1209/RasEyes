@@ -159,4 +159,4 @@ pytest tests/test_fusion.py
 | 6 | PoC 검증 및 베타 테스트 | 🔄 진행 중 |
 | 7 | TTS 통합 (카메라 정보 음성 전달) | ✅ 완료 |
 
-자세한 내용은 [ROADMAP.md](ROADMAP.md), 개발 규칙/배포 절차는 [CLAUDE.md](CLAUDE.md)를 참고하세요.
+자세한 내용은 [ROADMAP.md](docs/ROADMAP.md), 개발 규칙/배포 절차는 [CLAUDE.md](CLAUDE.md)를 참고하세요.

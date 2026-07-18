@@ -156,7 +156,7 @@ pytest tests/test_fusion.py
 | 3 | pytest 테스트 스위트 구축 | ✅ 완료 |
 | 4 | Orange Pi 5 하드웨어 이식 | ✅ 완료 |
 | 5 | 시스템 최적화 및 안정화 | ✅ 완료 |
-| 6 | PoC 검증 및 베타 테스트 | 🔄 진행 중 |
+| 6 | PoC 검증 및 베타 테스트 | ✅ 완료 (6-2 CSV 분석은 2.0으로 이관) |
 | 7 | TTS 통합 (카메라 정보 음성 전달) | ✅ 완료 |
 
-자세한 내용은 [ROADMAP.md](docs/ROADMAP.md), 개발 규칙/배포 절차는 [CLAUDE.md](CLAUDE.md)를 참고하세요.
+자세한 내용은 [1.0_ROADMAP.md](docs/1.0_ROADMAP.md)·[2.0_ROADMAP.md](docs/2.0_ROADMAP.md), 개발 규칙/배포 절차는 [CLAUDE.md](CLAUDE.md)를 참고하세요.

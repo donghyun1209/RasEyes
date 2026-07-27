@@ -97,6 +97,20 @@ class TestCsvLogger:
             rows = list(csv.DictReader(f))
         assert rows[0]["alert_triggered"] == "False"
 
+    def test_occlusion_alerts_default_and_explicit(self, tmp_path) -> None:
+        """occlusion_alerts가 기본값 0 및 명시값으로 기록된다."""
+        path = str(tmp_path / "test.csv")
+        log = CsvLogger(path=path)
+        log.open()
+        log.write_row(tof_distance_cm=200.0, alert_triggered=False, fps=15)
+        log.write_row(tof_distance_cm=200.0, alert_triggered=False, fps=15, occlusion_alerts=2)
+        log.close()
+
+        with open(path, newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+        assert int(rows[0]["occlusion_alerts"]) == 0
+        assert int(rows[1]["occlusion_alerts"]) == 2
+
     def test_timestamp_is_present(self, tmp_path) -> None:
         """timestamp 컬럼이 비어 있지 않게 기록된다."""
         path = str(tmp_path / "test.csv")

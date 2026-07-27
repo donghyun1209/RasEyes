@@ -25,6 +25,8 @@ env/
 # Logs (keep directory, ignore CSV output)
 logs/*.csv
 logs/*.log
+logs/events/
+logs_archive/
 
 # AI model files (large binaries — store in cloud/release assets)
 *.tflite

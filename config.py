@@ -135,3 +135,13 @@ TTS_PRERENDERED_PHRASES: List[str] = [          # 빌드 타임에 미리 합성
     "Caution, obstacle",
     "RasEyes ready",
 ]
+
+# === v2.0 Phase 3 — Event Clip Recording ===
+CLIP_BUFFER_FPS: int = 5                       # 링 버퍼 적재 주기 (200ms 간격). 저전력 4FPS 대응을 위해 시간 기준 (프레임 카운트 금지)
+CLIP_PRE_SEC: float = 5.0                      # 이벤트 전 보관 구간 (초)
+CLIP_POST_SEC: float = 3.0                     # 이벤트 후 수집 구간 (초)
+CLIP_COOLDOWN_SEC: float = 30.0                # 오버랩 억제 쿨다운. 불변식: 반드시 CLIP_POST_SEC보다 커야 함 (깨지면 후속 수집 중 재트리거 발생)
+CLIP_JPEG_QUALITY: int = 85                    # JPEG 인코딩 품질. Pi 실측 3.15ms/프레임 (640x480 노이즈 최악 케이스)
+CLIP_RETENTION_MAX_DIRS: int = 30              # 보존 클립 최대 개수 (사람이 검토 가능한 양)
+CLIP_RETENTION_MAX_AGE_DAYS: int = 7           # 보존 최대 기간 (일). 개수 한도와 AND 조건 — 행인 얼굴 자동 소멸
+CLIP_DIR: str = "logs/events"                  # 클립 저장 루트 (배포 rsync 및 .gitignore 제외 대상)

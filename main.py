@@ -20,6 +20,7 @@ from types import FrameType
 from typing import Callable, List, Optional, Tuple
 
 import cv2
+import numpy as np
 
 import config
 from audio.beep_controller import BeepController
@@ -30,6 +31,7 @@ from audio.mock_tts import MockTts
 from audio.piper_tts import PiperTts
 from audio.tts import EspeakTts
 from fusion.engine import FusionEngine, FusionResult, RiskLevel
+from logs.clip_recorder import ClipRecorder
 from logs.logger import CsvLogger
 from sensor.button_handler import ButtonHandler
 from sensor.interface import BaseToFHAL
@@ -330,6 +332,7 @@ class RasEyesApp:
         self._tts: BaseTtsHAL = _build_tts(use_mock)
         self._beep = BeepController()
         self._csv_logger = CsvLogger()
+        self._clips = ClipRecorder()
 
         self._vision_q: queue.Queue = queue.Queue(maxsize=config.QUEUE_SIZE)
         self._sensor_q: queue.Queue = queue.Queue(maxsize=config.QUEUE_SIZE)
@@ -361,6 +364,7 @@ class RasEyesApp:
         time.sleep(stagger)
         self._audio.start()
         self._csv_logger.open()
+        self._clips.rotate()
 
         if self._use_hw:
             try:
@@ -418,6 +422,7 @@ class RasEyesApp:
         self._audio.stop()
         self._tts.stop()
         self._csv_logger.close()
+        self._clips.close()
         logger.info("RasEyes 종료")
 
     def _check_vision_stall(self) -> bool:
@@ -449,6 +454,10 @@ class RasEyesApp:
         last_detections: List[DetectionResult] = []
         last_distance: float = float(config.MID_RISK_DIST_CM) + 1.0
 
+        # 이벤트 클립용 최신 프레임 (큐 get 실패 시에도 참조되므로 명시적으로 초기화)
+        last_frame: Optional[np.ndarray] = None
+        last_frame_ts: Optional[float] = None
+
         # 데이터 최신성 추적용 타임스탬프 (None = 아직 데이터 없음)
         last_vision_ts: Optional[float] = None
         last_sensor_ts: Optional[float] = None
@@ -475,6 +484,7 @@ class RasEyesApp:
         _occlusion_counter: int = 0
         _occlusion_frame_counter: int = 0
         _last_occlusion_alert_time: float = 0.0
+        _occlusion_alert_count: int = 0
 
         # 5-4: 배터리 잔량 확인
         last_battery_check_time: float = 0.0
@@ -513,6 +523,7 @@ class RasEyesApp:
                         )
                 prev_vision_ts = vision_ts
                 last_vision_ts = vision_ts
+                last_frame_ts = vision_ts
 
                 # 5-3: 카메라 가림 감지 — N프레임마다 1회, 다운샘플링한 프레임으로 픽셀 변화량 분석 (CPU 절감)
                 if not self._use_mock and last_frame is not None:
@@ -658,6 +669,22 @@ class RasEyesApp:
                     if not self._mute_active:
                         self._audio.play_occlusion_alert()
                     _last_occlusion_alert_time = now
+                    _occlusion_alert_count += 1
+
+            # v2.0 3: 경고 이벤트 클립 — 링 버퍼 적재 및 HIGH 트리거
+            # E2E 레이턴시 측정 이후에 두어 JPEG 인코딩 시간이 레이턴시 EMA에 섞이지 않게 한다.
+            self._clips.offer_frame(
+                now,
+                last_frame,
+                last_frame_ts,
+                last_detections,
+                last_distance,
+                result.distance_cm,
+            )
+            # 트리거는 result.risk_level 기준 — effective_risk는 배터리 경고가 병합된 값이라
+            # 장애물 이벤트가 아니다.
+            if result.risk_level is RiskLevel.HIGH:
+                self._clips.trigger(now, result)
 
             now = time.monotonic()
             if now - last_log_time >= config.LOG_INTERVAL_SEC:
@@ -695,10 +722,12 @@ class RasEyesApp:
                         cpu_temp=cpu_temp,
                         latency_ms=round(e2e_ms_ema, 1),
                         tts_spoken=_last_tts_text,
+                        occlusion_alerts=_occlusion_alert_count,
                     )
                 except Exception as exc:
                     logger.error("CSV 로그 기록 실패: %s", exc)
                 _last_tts_text = ""
+                _occlusion_alert_count = 0
                 last_log_time = now
 
                 # 5-4: 배터리 잔량 확인 (30초 주기)

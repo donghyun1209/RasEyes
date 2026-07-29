@@ -30,6 +30,7 @@ from audio.mock import MockAudio
 from audio.mock_tts import MockTts
 from audio.piper_tts import PiperTts
 from audio.tts import EspeakTts
+from fusion.alert_policy import AlertPolicy
 from fusion.engine import FusionEngine, FusionResult, RiskLevel
 from logs.clip_recorder import ClipRecorder
 from logs.logger import CsvLogger
@@ -191,6 +192,33 @@ def _build_tts_text(result: FusionResult) -> Optional[str]:
     return f"{label} {direction_en}"
 
 
+def _should_fps_fallback(
+    effective_fps: float, low_power: bool, thermal_throttle: bool
+) -> bool:
+    """FPS 미달을 '고장'으로 보고 ToF 단독 모드로 전환할지 판단한다.
+
+    저전력(DYNAMIC_FPS_LOW_POWER_FPS=4)과 발열 스로틀링(THERMAL_THROTTLE_FPS=5)은
+    **의도적으로** FPS를 낮춘 상태이고 둘 다 FPS_FALLBACK_THRESHOLD(8)보다 낮다.
+    이를 고장으로 취급하면 절전 모드에 드는 순간 비전이 꺼져 모드가 스스로를
+    무력화한다 — 2026-07-28 Pi 실측에서 저전력 진입 0.7초 뒤 ToF 단독 전환이
+    기록됐다. Fallback은 카메라 멈춤·과부하 같은 **예기치 못한** FPS 붕괴만 잡는다.
+
+    저전력 4FPS는 250ms 간격으로 DATA_STALENESS_THRESHOLD_SEC(0.5초) 안이라
+    탐지 결과는 그대로 유효하다.
+
+    Args:
+        effective_fps: 루프 FPS와 비전 FPS 중 작은 값.
+        low_power: 저전력 모드 활성 여부.
+        thermal_throttle: 발열 스로틀링 활성 여부.
+
+    Returns:
+        ToF 단독 모드로 전환해야 하면 True.
+    """
+    if low_power or thermal_throttle:
+        return False
+    return effective_fps < config.FPS_FALLBACK_THRESHOLD
+
+
 def _put_latest(q: "queue.Queue", item: object) -> None:
     """큐에 최신 항목만 유지한다. 가득 차면 기존 항목을 버리고 교체."""
     try:
@@ -328,6 +356,7 @@ class RasEyesApp:
         self._vision: VisionInterface = _build_vision(use_mock, use_hw)
         self._sensor: BaseToFHAL = _build_sensor(use_mock, use_hw)
         self._fusion = FusionEngine()
+        self._alert_policy = AlertPolicy()
         self._audio: BaseAudioHAL = _build_audio(use_mock, use_hw)
         self._tts: BaseTtsHAL = _build_tts(use_mock)
         self._beep = BeepController()
@@ -395,7 +424,7 @@ class RasEyesApp:
         )
         self._s_thread = threading.Thread(
             target=_sensor_worker,
-            args=(self._sensor, self._stop_event, self._sensor_q, self._fusion.reset_filter),
+            args=(self._sensor, self._stop_event, self._sensor_q, self._on_sensor_reinit),
             daemon=True,
             name="sensor-worker",
         )
@@ -406,7 +435,20 @@ class RasEyesApp:
     def _toggle_mute(self) -> None:
         """물리 버튼 누름 시 오디오 음소거 온/오프 전환."""
         self._mute_active = not self._mute_active
+        if not self._mute_active:
+            # 음소거 중 래치된 위험 수준이 남아 있으면 해제 후 재진입 전까지
+            # 경보가 나가지 않는다. 해제 시점에 초기화해 즉시 다시 알리도록 한다.
+            self._alert_policy.reset()
         logger.info("버튼 누름: 오디오 %s", "음소거" if self._mute_active else "음소거 해제")
+
+    def _on_sensor_reinit(self) -> None:
+        """ToF 센서 재초기화 직후 거리 기반 상태를 모두 초기화한다.
+
+        필터 버퍼와 경보 래치 모두 재초기화 전 거리값을 기준으로 하고 있어,
+        센서가 복구되면 값이 불연속으로 뛴다. 둘을 함께 리셋해야 한다.
+        """
+        self._fusion.reset_filter()
+        self._alert_policy.reset()
 
     def stop(self) -> None:
         """모든 워커 스레드를 중단하고 컴포넌트를 정리한다."""
@@ -491,6 +533,11 @@ class RasEyesApp:
 
         # 7: TTS 로그 주기 내 마지막 발화 텍스트 추적
         _last_tts_text: str = ""
+
+        # 로그 주기별 진단 카운터 — 경보가 줄어든 것인지 센서가 실명한 것인지 구별하기 위함
+        _alerts_emitted: int = 0
+        _tof_only_cycles: int = 0
+        _total_cycles: int = 0
 
         while not self._stop_event.is_set():
             loop_start = time.monotonic()
@@ -590,9 +637,12 @@ class RasEyesApp:
             # 비전 워커 Watchdog 체크
             self._check_vision_stall()
 
-            # FPS 기준 미달 시 ToF 단독 모드 Fallback
+            # FPS 기준 미달 시 ToF 단독 모드 Fallback (의도적 저FPS는 제외 — 헬퍼 참조)
             effective_fps = min(actual_fps, vision_fps)
-            if effective_fps < config.FPS_FALLBACK_THRESHOLD:
+            low_power = self._low_power_event.is_set()
+            thermal_throttle = self._thermal_event.is_set()
+            intentional_low_fps = low_power or thermal_throttle
+            if _should_fps_fallback(effective_fps, low_power, thermal_throttle):
                 if not fps_fallback_active:
                     logger.warning(
                         "FPS 기준 미달 (루프 %.1f FPS, 비전 %.1f FPS < %d), ToF 단독 모드 전환",
@@ -604,9 +654,10 @@ class RasEyesApp:
                 last_detections = []
             elif fps_fallback_active:
                 logger.info(
-                    "FPS 회복 (루프 %.1f FPS, 비전 %.1f FPS), 정상 모드 복귀",
+                    "FPS fallback 해제 (루프 %.1f FPS, 비전 %.1f FPS%s)",
                     actual_fps,
                     vision_fps,
+                    ", 의도적 저FPS 구간" if intentional_low_fps else " — 정상 복귀",
                 )
                 fps_fallback_active = False
 
@@ -623,6 +674,18 @@ class RasEyesApp:
                 if pending_system is not None and pending_system.value > result.risk_level.value
                 else result.risk_level
             )
+
+            # 위험 '상태'를 경보 '이벤트'로 변환 — 진입/승격 시 1회, 지속 시 리마인더만.
+            # 시스템 경고는 장애물 경보가 아니므로 정책을 우회한다.
+            decision = self._alert_policy.evaluate(result.risk_level, result.distance_cm, now)
+            if decision.emit:
+                _alerts_emitted += 1
+            alert_gate_open = decision.emit or pending_system is not None
+
+            _total_cycles += 1
+            if result.tof_only_mode:
+                _tof_only_cycles += 1
+
             # TTS 발화 상태 1회 조회 — 비프음 suppress 및 NPU 스로틀링 이벤트에 공용 사용
             tts_speaking = self._tts.is_speaking()
             if tts_speaking != self._tts_active_event.is_set():
@@ -631,9 +694,12 @@ class RasEyesApp:
                 else:
                     self._tts_active_event.clear()
 
-            # TTS 발화 중에는 비프음을 suppresse — 두 aplay가 겹쳐 들리는 것을 방지
+            # TTS 발화 중에는 비프음을 suppresse — 두 aplay가 겹쳐 들리는 것을 방지.
+            # 게이트가 닫혀 있으면 should_beep()을 호출하지 않는다 — 쿨다운 타이머가
+            # 갱신되지 않아야 다음 경보가 지연 없이 즉시 통과한다.
             should_play_beep = (
-                self._beep.should_beep(effective_risk)
+                alert_gate_open
+                and self._beep.should_beep(effective_risk)
                 and not self._mute_active
                 and not tts_speaking
             )
@@ -642,7 +708,7 @@ class RasEyesApp:
 
             # TTS: 탐지 결과 기반 음성 알림 (비프음과 독립적으로 논블로킹 동작)
             tts_phrase = _build_tts_text(result)
-            if tts_phrase and not self._mute_active:
+            if decision.emit and tts_phrase and not self._mute_active:
                 self._tts.speak(tts_phrase, result.risk_level)
                 _last_tts_text = tts_phrase
 
@@ -723,11 +789,19 @@ class RasEyesApp:
                         latency_ms=round(e2e_ms_ema, 1),
                         tts_spoken=_last_tts_text,
                         occlusion_alerts=_occlusion_alert_count,
+                        alerts_emitted=_alerts_emitted,
+                        tof_raw_cm=last_distance,
+                        tof_only_ratio=(
+                            _tof_only_cycles / _total_cycles if _total_cycles else 0.0
+                        ),
                     )
                 except Exception as exc:
                     logger.error("CSV 로그 기록 실패: %s", exc)
                 _last_tts_text = ""
                 _occlusion_alert_count = 0
+                _alerts_emitted = 0
+                _tof_only_cycles = 0
+                _total_cycles = 0
                 last_log_time = now
 
                 # 5-4: 배터리 잔량 확인 (30초 주기)

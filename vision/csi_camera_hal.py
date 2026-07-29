@@ -22,6 +22,7 @@ class CSICameraHAL(BaseCameraHAL):
         width: 요청 캡처 너비 (픽셀).
         height: 요청 캡처 높이 (픽셀).
         fps: 요청 캡처 FPS.
+        rotate_180: 프레임을 180도 회전할지 여부 (모듈이 뒤집혀 장착된 경우).
     """
 
     def __init__(
@@ -30,11 +31,13 @@ class CSICameraHAL(BaseCameraHAL):
         width: int = config.FRAME_WIDTH,
         height: int = config.FRAME_HEIGHT,
         fps: int = config.TARGET_FPS,
+        rotate_180: bool = config.CSI_ROTATE_180,
     ) -> None:
         self._device_path = device_path
         self._width = width
         self._height = height
         self._fps = fps
+        self._rotate_180 = rotate_180
         self._cap: cv2.VideoCapture | None = None
         self._needs_resize: bool = False
 
@@ -49,9 +52,9 @@ class CSICameraHAL(BaseCameraHAL):
         crop = f"crop:(0,0)/{self._width}x{self._height}"
         cmds = [
             ["media-ctl", "-d", "/dev/media0", "--set-v4l2",
-             f'"m01_b_ov13855 7-0036":0[fmt:{fmt}]'],
+             f'"m02_b_ov13855 2-0036":0[fmt:{fmt}]'],
             ["media-ctl", "-d", "/dev/media1", "--set-v4l2",
-             f'"rkcif-mipi-lvds":0[fmt:{fmt}]'],
+             f'"rkcif-mipi-lvds1":0[fmt:{fmt}]'],
             ["media-ctl", "-d", "/dev/media1", "--set-v4l2",
              f'"rkisp-isp-subdev":0[fmt:{fmt} {crop}]'],
             ["media-ctl", "-d", "/dev/media1", "--set-v4l2",
@@ -110,6 +113,9 @@ class CSICameraHAL(BaseCameraHAL):
     def read_frame(self) -> np.ndarray:
         """최신 BGR 프레임을 반환한다.
 
+        rotate_180이 True면 회전까지 마친 프레임을 반환하므로, 추론과 이벤트 클립이
+        모두 정방향 영상을 보게 된다.
+
         Returns:
             shape (H, W, 3) BGR ndarray.
 
@@ -125,6 +131,8 @@ class CSICameraHAL(BaseCameraHAL):
             frame = cv2.resize(
                 frame, (self._width, self._height), interpolation=cv2.INTER_NEAREST
             )
+        if self._rotate_180:
+            frame = cv2.rotate(frame, cv2.ROTATE_180)
         return frame
 
     def stop(self) -> None:

@@ -145,6 +145,12 @@ def summarize(session: Session) -> Dict[str, float]:
     alerts = sum(1 for r in rows if str(r.get("alert_triggered", "")).lower() == "true")
     occlusions = sum(int(_parse_float(r.get("occlusion_alerts", ""))) for r in rows)
 
+    # 아래 3개는 경보 정책 도입(2026-07-28) 이후 세션에만 존재한다.
+    # 이전 아카이브는 .get()이 ""를 반환해 0으로 집계된다.
+    emitted = sum(int(_parse_float(r.get("alerts_emitted", ""))) for r in rows)
+    tof_raws = [_parse_float(r.get("tof_raw_cm", "")) for r in rows if r.get("tof_raw_cm")]
+    tof_only = [_parse_float(r.get("tof_only_ratio", "")) for r in rows if r.get("tof_only_ratio")]
+
     minutes = session.duration_sec / 60.0
     return {
         "rows": float(len(rows)),
@@ -174,6 +180,14 @@ def summarize(session: Session) -> Dict[str, float]:
         "alerts": float(alerts),
         "alerts_per_min": alerts / minutes if minutes > 0 else 0.0,
         "occlusions": float(occlusions),
+        "emitted": float(emitted),
+        "emitted_per_min": emitted / minutes if minutes > 0 else 0.0,
+        "tof_oor_ratio": (
+            sum(1 for d in tof_raws if d >= config.TOF_OUT_OF_RANGE_CM) / len(tof_raws)
+            if tof_raws else 0.0
+        ),
+        "tof_only_ratio": statistics.fmean(tof_only) if tof_only else 0.0,
+        "has_diagnostics": 1.0 if tof_raws else 0.0,
     }
 
 
@@ -194,9 +208,20 @@ def print_report(session: Session, stats: Dict[str, float]) -> None:
     print("  레이턴시  : 평균 {:.1f}ms / p95 {:.1f}ms | {}ms 초과 {:.1%}".format(
         stats["latency_mean"], stats["latency_p95"],
         config.LATENCY_WARN_THRESHOLD_MS, stats["latency_over_ratio"]))
-    print("  알람      : {:.0f}회 | 분당 {:.2f}회 (KPI: < 1회/분) {}".format(
-        stats["alerts"], stats["alerts_per_min"],
-        "✓" if stats["alerts_per_min"] < 1.0 else "✗"))
+    print("  위험 상태 : {:.0f}초 | 분당 {:.2f}초 (거리 임계값 이내였던 시간)".format(
+        stats["alerts"], stats["alerts_per_min"]))
+    if stats["has_diagnostics"]:
+        print("  경보 발화 : {:.0f}회 | 분당 {:.2f}회 (KPI: < 1회/분) {}".format(
+            stats["emitted"], stats["emitted_per_min"],
+            "✓" if stats["emitted_per_min"] < 1.0 else "✗"))
+        # 경보가 줄어든 것이 개선인지 센서 실명인지 구별하기 위한 지표.
+        # OoR이 지나치게 높으면 아무것도 못 보는 상태로 조용해진 것이다.
+        oor_flag = " ⚠ 센서 실명 의심" if stats["tof_oor_ratio"] > 0.7 else ""
+        print("  ToF OoR   : {:.1%}{}".format(stats["tof_oor_ratio"], oor_flag))
+        print("  ToF 단독  : {:.1%} (비전 실명 정도 — 높을수록 카메라가 못 보고 있음)".format(
+            stats["tof_only_ratio"]))
+    else:
+        print("  경보 발화 : (진단 컬럼 없음 — 경보 정책 도입 이전 세션)")
     print("  가림 경고 : {:.0f}회".format(stats["occlusions"]))
 
 
@@ -237,17 +262,26 @@ def main() -> int:
     total_rows = 0
     total_min = 0.0
     total_alerts = 0.0
+    total_emitted = 0.0
+    diag_min = 0.0
     for session in sessions:
         stats = summarize(session)
         print_report(session, stats)
         total_rows += len(session.rows)
         total_min += stats["duration_min"]
         total_alerts += stats["alerts"]
+        if stats["has_diagnostics"]:
+            total_emitted += stats["emitted"]
+            diag_min += stats["duration_min"]
 
     print("\n── 전체 ─────────────────────────")
-    print("  총 {}행 / {:.1f}분 / 알람 {:.0f}회 (분당 {:.2f}회)".format(
+    print("  총 {}행 / {:.1f}분 / 위험 상태 {:.0f}초 (분당 {:.2f}초)".format(
         total_rows, total_min, total_alerts,
         total_alerts / total_min if total_min > 0 else 0.0))
+    if diag_min > 0:
+        print("  경보 발화 {:.0f}회 / {:.1f}분 = 분당 {:.2f}회 (KPI: < 1회/분) {}".format(
+            total_emitted, diag_min, total_emitted / diag_min,
+            "✓" if total_emitted / diag_min < 1.0 else "✗"))
     return 0
 
 

@@ -6,12 +6,22 @@ HIGH_RISK_DIST_CM: int = 100
 MID_RISK_DIST_CM: int = 150
 MIN_CONFIDENCE: float = 0.4
 
+# Alert Policy (엣지 트리거 + 히스테리시스)
+# 위험 판정은 "거리 <= 임계값"인 상태라 그대로 두면 매 사이클 경보가 나간다.
+# 2026-07-28 야외 실측: HIGH 상태 55.8% → 비프 분당 181회.
+# 진입 시 1회만 울리고, 임계값+히스테리시스를 넘어야 해제한다.
+ALERT_HYSTERESIS_CM: float = 30.0   # 해제 여유. 실측상 20→80cm로 키워도 감소율 81%→88%로 효과 미미
+ALERT_REMINDER_SEC: float = 5.0     # 위험이 지속될 때 재알림 간격
+
 # Signal Filtering
 MOVING_AVG_WINDOW: int = 3
 
 # Logging
 LOG_INTERVAL_SEC: float = 1.0
-LOG_FILE_PATH: str = "logs/raseyes_log.csv"
+# CSV는 세션마다 새 파일로 쓴다. 단일 파일에 mode="w"로 쓰던 방식은 재시작 때마다
+# 이전 세션을 덮어써, 2026-07-28 야외 테스트 로그가 통째로 소실됐다.
+LOG_DIR: str = "logs"
+LOG_FILE_PREFIX: str = "raseyes_log"
 LOG_FLUSH_INTERVAL_ROWS: int = 10  # 이 행 수마다 1회 flush (디스크 I/O 전력 절감)
 
 # Camera
@@ -61,15 +71,24 @@ STARTUP_STAGGER_SEC: float = 1.5               # 컴포넌트 순차 기동 간 
 STARTUP_TTS_WAIT_TIMEOUT_SEC: float = 5.0      # 부팅 TTS 발화 완료 대기 최대 시간 (초)
 
 # === Phase 4 — Hardware (Orange Pi 5) ===
+# ⚠️ 아래 CSI 경로와 csi_camera_hal._setup_isp_pipeline()의 media-ctl 엔티티 이름은
+#    /boot/orangepiEnv.txt의 `overlays=... ov13855-c3` 설정에 종속된다.
+#    카메라를 다른 CSI 포트로 옮기면 오버레이(c1/c2=i2c-7, c3=i2c-2)를 바꿔야 하고,
+#    그에 따라 i2c 버스 번호가 박힌 엔티티 이름(`m02_b_ov13855 2-0036`)도 함께 바뀐다.
 CSI_DEVICE_PATH: str = "/dev/video11"          # OV13855 MIPI CSI mainpath
 CSI_SENSOR_SUBDEV: str = "/dev/v4l-subdev2"    # OV13855 V4L2 subdev (노출 제어용)
 CSI_SENSOR_EXPOSURE: int = 3000                # 부팅 초기 수동 노출값 (max 3210)
 CSI_SENSOR_GAIN: int = 1984                    # 부팅 초기 아날로그 게인 (max 1984)
+# 카메라 모듈이 상하 반전되어 장착됨. 센서에 flip 컨트롤이 없어 소프트웨어로 회전한다.
+# 미적용 시 COCO 학습 YOLO가 거꾸로 선 사람을 놓치거나(conf 0.37) 오탐한다(laptop 0.42).
+# Pi 실측 0.74ms/프레임 — 66ms(15FPS) 예산의 1.1%.
+CSI_ROTATE_180: bool = True
 TOF_I2C_PORT: int = 5                          # i2c-5 (I2C5_M3 overlay)
 TOF_I2C_ADDRESS: int = 0x29                    # VL53L1X 기본 I2C 주소
 TOF_TIMING_BUDGET_US: int = 200_000            # 200ms: MEDIUM mode 안정 동작 최소값
 TOF_INTER_MEASUREMENT_MS: int = 210           # timing_budget + 10ms 마진
 TOF_POLL_INTERVAL_SEC: float = 0.20            # 폴링 루프 대기 시간 (TOF_INTER_MEASUREMENT_MS에 맞춰 중복 조회 방지)
+TOF_RANGING_MODE_SHORT: int = 1                # SHORT: 주변광 내성 최상, 최대 거리는 짧음 (실측 필요)
 TOF_RANGING_MODE_MEDIUM: int = 2               # VL53L1X 레인징 모드 (2 = MEDIUM, 최대 3m, 200ms+ 타이밍 버짓 필요)
 TOF_STALE_TIMEOUT_SEC: float = 1.0             # 이 시간 이상 값 갱신 없으면 센서 무응답으로 간주
 RKNN_MODEL_PATH: str = "yolov8n.rknn"          # NPU 추론 모델 경로

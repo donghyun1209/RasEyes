@@ -1,8 +1,11 @@
 """MockVision 및 MockCamera 동작 테스트."""
+from unittest.mock import MagicMock
+
 import pytest
 import numpy as np
 
 import config
+from vision.csi_camera_hal import CSICameraHAL
 from vision.interface import DetectionResult
 from vision.mock import MockVision
 from vision.mock_camera import MockCamera
@@ -93,3 +96,48 @@ class TestMockCamera:
         cam = MockCamera(source="/nonexistent/image.jpg")
         with pytest.raises((FileNotFoundError, ImportError)):
             cam.start()
+
+
+class TestCSICameraRotation:
+    """CSICameraHAL의 180도 회전 처리 테스트.
+
+    카메라 모듈이 상하 반전되어 장착되어 있어 소프트웨어 회전이 필요하다.
+    실제 장치 없이 VideoCapture만 모킹해 검증한다.
+    """
+
+    @staticmethod
+    def _hal_with_frame(frame: np.ndarray, rotate_180: bool) -> "CSICameraHAL":
+        """읽기 결과가 고정된 CSICameraHAL을 만든다."""
+        hal = CSICameraHAL(rotate_180=rotate_180)
+        cap = MagicMock()
+        cap.read.return_value = (True, frame)
+        hal._cap = cap
+        return hal
+
+    def test_frame_is_rotated_when_enabled(self) -> None:
+        """rotate_180=True면 상하좌우가 뒤집힌 프레임을 반환한다."""
+        frame = np.zeros((4, 4, 3), dtype=np.uint8)
+        frame[0, 0] = 255  # 좌상단 표식
+        hal = self._hal_with_frame(frame, rotate_180=True)
+
+        result = hal.read_frame()
+
+        assert (result[3, 3] == 255).all()
+        assert (result[0, 0] == 0).all()
+
+    def test_frame_is_untouched_when_disabled(self) -> None:
+        """rotate_180=False면 원본 프레임을 그대로 반환한다."""
+        frame = np.zeros((4, 4, 3), dtype=np.uint8)
+        frame[0, 0] = 255
+        hal = self._hal_with_frame(frame, rotate_180=False)
+
+        result = hal.read_frame()
+
+        assert (result[0, 0] == 255).all()
+
+    def test_rotation_preserves_shape(self) -> None:
+        """회전 후에도 프레임 해상도가 유지된다."""
+        frame = np.zeros((config.FRAME_HEIGHT, config.FRAME_WIDTH, 3), dtype=np.uint8)
+        hal = self._hal_with_frame(frame, rotate_180=True)
+
+        assert hal.read_frame().shape == frame.shape

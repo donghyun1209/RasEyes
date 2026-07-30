@@ -78,9 +78,16 @@ class TestDirection:
 
     def test_tof_only_has_no_direction(self) -> None:
         engine = FusionEngine()
-        # conf=0.1 < MIN_CONFIDENCE → tof_only_mode
-        result = engine.evaluate([_det_at("person", 0, 100, conf=0.1)], raw_distance_cm=80.0)
+        result = engine.evaluate([], raw_distance_cm=80.0, vision_blind=True)
         assert result.tof_only_mode is True
+        assert result.direction is None
+        assert result.top_label is None
+
+    def test_low_conf_detection_has_no_direction(self) -> None:
+        """유효 탐지가 아니면 방향·레이블을 만들지 않는다 (비전은 정상이어도)."""
+        engine = FusionEngine()
+        result = engine.evaluate([_det_at("person", 0, 100, conf=0.1)], raw_distance_cm=80.0)
+        assert result.tof_only_mode is False
         assert result.direction is None
         assert result.top_label is None
 

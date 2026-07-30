@@ -64,6 +64,11 @@ class RknnDetector(VisionInterface):
     def conf_threshold(self) -> float:
         return self._conf_threshold
 
+    @property
+    def ae_settled(self) -> bool:
+        """카메라의 AE 수렴 상태를 그대로 전달한다."""
+        return self._camera.ae_settled
+
     def start(self) -> None:
         """RKNN 런타임을 초기화하고 카메라를 시작한다.
 

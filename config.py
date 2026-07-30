@@ -77,8 +77,11 @@ STARTUP_TTS_WAIT_TIMEOUT_SEC: float = 5.0      # 부팅 TTS 발화 완료 대기
 #    그에 따라 i2c 버스 번호가 박힌 엔티티 이름(`m02_b_ov13855 2-0036`)도 함께 바뀐다.
 CSI_DEVICE_PATH: str = "/dev/video11"          # OV13855 MIPI CSI mainpath
 CSI_SENSOR_SUBDEV: str = "/dev/v4l-subdev2"    # OV13855 V4L2 subdev (노출 제어용)
-CSI_SENSOR_EXPOSURE: int = 3000                # 부팅 초기 수동 노출값 (max 3210)
-CSI_SENSOR_GAIN: int = 1984                    # 부팅 초기 아날로그 게인 (max 1984)
+# AE 루프의 시드값. 예전에는 실내 최적값(3000/1984=게인 최대치)을 박아뒀는데,
+# 그 상태로 야외에서 부팅하면 첫 수 초가 완전 화이트아웃이다. AE가 곧 잡으므로
+# 한쪽 극단에 두지 않고 중간에서 출발한다.
+CSI_SENSOR_EXPOSURE: int = 1500                # 부팅 초기 노출 시드 (max 3210)
+CSI_SENSOR_GAIN: int = 128                     # 부팅 초기 아날로그 게인 시드 (min 128 / max 1984)
 # 카메라 모듈이 상하 반전되어 장착됨. 센서에 flip 컨트롤이 없어 소프트웨어로 회전한다.
 # 미적용 시 COCO 학습 YOLO가 거꾸로 선 사람을 놓치거나(conf 0.37) 오탐한다(laptop 0.42).
 # Pi 실측 0.74ms/프레임 — 66ms(15FPS) 예산의 1.1%.
@@ -164,3 +167,52 @@ CLIP_JPEG_QUALITY: int = 85                    # JPEG 인코딩 품질. Pi 실�
 CLIP_RETENTION_MAX_DIRS: int = 30              # 보존 클립 최대 개수 (사람이 검토 가능한 양)
 CLIP_RETENTION_MAX_AGE_DAYS: int = 7           # 보존 최대 기간 (일). 개수 한도와 AND 조건 — 행인 얼굴 자동 소멸
 CLIP_DIR: str = "logs/events"                  # 클립 저장 루트 (배포 rsync 및 .gitignore 제외 대상)
+
+# === v2.0 Phase 5-1 — Auto Exposure (AE) ===
+# OV13855 드라이버에는 auto_exposure/white_balance_auto 컨트롤이 없고 rkaiq 3A 데몬도
+# 미설치다 (2026-07-29 Pi 실측). exposure/analogue_gain 수동 컨트롤만 노출되어 있어
+# AE 루프를 직접 돌린다. 2026-07-29 야외 실측에서 고정 노출이 화이트아웃을 일으켜
+# 프레임당 탐지가 0.64 → 0.05건으로 붕괴한 것이 도입 이유다.
+CSI_AE_ENABLED: bool = True                    # False면 시드값 고정 (야외 결과 이상 시 원인 격리용)
+CSI_AE_TARGET_LUMA: float = 110.0              # 목표 평균 휘도 (0~255)
+CSI_AE_TOLERANCE: float = 12.0                 # 데드밴드. 이 안에서는 v4l2 호출 자체를 하지 않는다 (헌팅 억제)
+CSI_AE_UPDATE_INTERVAL_SEC: float = 0.30       # 측광·보정 주기
+# 센서에 노출을 써도 2~3프레임 뒤에 반영된다. 그 사이 같은 방향으로 또 스텝을 밟으면
+# 오버슛 → 헌팅이 된다. 적용 직후 이 시간 동안은 측광 자체를 건너뛴다.
+CSI_AE_SETTLE_SEC: float = 0.25
+# v4l2-ctl subprocess 타임아웃. _setup_isp_pipeline()의 5초를 그대로 쓰면 v4l2-ctl이
+# 멈췄을 때 비전 워커가 5초 블로킹되어 VISION_STALL_THRESHOLD_SEC(2.0)를 넘긴다.
+CSI_AE_CTRL_TIMEOUT_SEC: float = 0.5
+CSI_AE_MAX_STEP_UP: float = 2.0                # 1회 최대 증광 배율
+CSI_AE_MAX_STEP_DOWN: float = 4.0              # 1회 최대 감광 배율. 화이트아웃이 급성 실패라 감광을 더 크게 잡는다
+# 평균 휘도만 보면 부분 화이트아웃에 속는다 (절반이 날아가도 평균은 타깃 근처).
+# 게다가 평균은 255에서 포화해 실제 과노출 배율을 과소평가한다. 클리핑 비율이
+# 한도를 넘으면 평균과 무관하게 고정 배율로 감광해 기하급수적으로 걷어낸다.
+CSI_AE_CLIP_THRESH: int = 250                  # 이 값 이상을 클리핑 픽셀로 센다
+CSI_AE_CLIP_LIMIT: float = 0.10                # 클리핑 픽셀 비율 한도
+CSI_AE_CLIP_STEP: float = 0.4                  # 한도 초과 시 고정 감광 배율
+# 저전력 모드 진입을 미룰지 판단하는 "AE가 급하다" 기준. 데드밴드를 그대로 쓰면
+# 조도가 늘 변하는 야외에서 AE가 상시 조정 중이라 저전력이 영영 걸리지 않는다.
+# 프레임이 실제로 못 쓸 수준으로 어긋났을 때만 FPS를 붙든다.
+CSI_AE_URGENT_LUMA_ERROR: float = 50.0
+CSI_AE_EXPOSURE_MIN: int = 4                   # 하드웨어 범위 (v4l2 exposure: 4 ~ 3210)
+# 노출은 길수록 저노이즈지만 모션블러가 늘어난다. 보행 웨어러블이라 블러가 불리하므로
+# 이 값을 낮추면 어두운 곳에서 게인(노이즈)으로 대신 채운다. 야외 실측 후 튜닝한다.
+CSI_AE_EXPOSURE_MAX: int = 3210
+CSI_AE_GAIN_MIN: int = 128                     # 하드웨어 범위 (v4l2 analogue_gain: 128 ~ 1984)
+CSI_AE_GAIN_MAX: int = 1984
+CSI_AE_METER_WIDTH: int = 160                  # 측광용 다운샘플링 너비 (원본 640의 1/4)
+CSI_AE_METER_HEIGHT: int = 120                 # 측광용 다운샘플링 높이 (원본 480의 1/4)
+
+# === v2.0 Phase 5-2 — 비전 신뢰 불가(vision_blind) 판정 ===
+# "탐지 0개"와 "카메라 실명"을 구분한다. 예전에는 max_conf < MIN_CONFIDENCE 하나로
+# 뭉뚱그렸는데, 디텍터가 이미 conf로 필터링하므로 그 식은 len(detections)==0과
+# 동치였다. 그 결과 빈 장면에서도 객체 확인 게이트가 우회되어 ToF 숫자만으로 경보가
+# 나갔다 (2026-07-29 야외 tof_only_ratio 96.2%).
+# 밴드를 벗어나면 실명으로 본다 — 암흑과 화이트아웃 둘 다 카메라가 못 보는 상태다.
+VISION_BLIND_LUMA_MIN: float = 25.0
+VISION_BLIND_LUMA_MAX: float = 235.0
+# AE 수렴 과도기(1~2초)에 휘도가 밴드를 들락거리면 모드가 깜빡여 MID 경보가 되살아난다.
+# 진입/해제 모두 연속 프레임을 요구하고, 해제선에 여유를 둬 경계 진동을 흡수한다.
+VISION_BLIND_DEBOUNCE_FRAMES: int = 5
+VISION_BLIND_HYSTERESIS_LUMA: float = 15.0

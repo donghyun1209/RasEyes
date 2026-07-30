@@ -39,6 +39,7 @@ class VL53L1XHAL(BaseToFHAL):
         self._lock = threading.Lock()
         self._latest_distance_mm: Optional[int] = None
         self._latest_update_ts: float = 0.0
+        self._sample_seq: int = 0
         self._poll_thread: Optional[threading.Thread] = None
 
     def start(self) -> None:
@@ -112,10 +113,26 @@ class VL53L1XHAL(BaseToFHAL):
                 with self._lock:
                     self._latest_distance_mm = distance_mm
                     self._latest_update_ts = time.monotonic()
+                    self._sample_seq += 1
                 time.sleep(config.TOF_POLL_INTERVAL_SEC)
             except Exception as exc:
                 logger.warning("ToF 폴링 오류 (무시하고 계속): %s", exc)
                 time.sleep(config.TOF_POLL_INTERVAL_SEC)
+
+    @property
+    def sample_seq(self) -> int:
+        """폴링 루프가 값을 갱신할 때마다 증가하는 카운터.
+
+        폴링 주기(TOF_POLL_INTERVAL_SEC=0.20s)와 센서 측정 주기
+        (TOF_INTER_MEASUREMENT_MS=210ms)가 어긋나 드리프트가 있으므로 "시퀀스 증가 =
+        새 물리 측정"이 엄밀히 보장되지는 않는다. 다만 메인 루프(15Hz)가 같은 값을
+        3번씩 읽던 3배 과샘플링을 ~1.05배로 줄이는 것이 목적이라 충분하다.
+
+        Returns:
+            단조 증가하는 샘플 시퀀스 번호.
+        """
+        with self._lock:
+            return self._sample_seq
 
     def read_distance_cm(self) -> float:
         """가장 최근에 폴링된 거리 측정값을 cm 단위로 반환한다.

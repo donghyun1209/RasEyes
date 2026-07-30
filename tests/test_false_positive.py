@@ -40,27 +40,36 @@ def _det(conf: float, label: str = "person") -> DetectionResult:
 
 
 class TestLowConfidenceSuppression:
-    """confidence < MIN_CONFIDENCE(0.4)인 탐지는 비전 결과를 무시하고
-    ToF 단독 모드로 전환되어 오탐지를 억제해야 한다."""
+    """confidence < MIN_CONFIDENCE(0.4)인 탐지는 유효 탐지로 치지 않는다.
+
+    비전 자체는 정상이므로 tof_only_mode는 False다 — 카메라가 못 보는 것과
+    카메라가 봤지만 확신하지 못하는 것은 다른 상태다. 근접(HIGH)만 안전망으로 남는다.
+    """
 
     def test_low_conf_safe_distance_no_alert(self, engine: FusionEngine) -> None:
-        """낮은 신뢰도 탐지 + 안전 거리 → 경보 없음, tof_only 활성화."""
+        """낮은 신뢰도 탐지 + 안전 거리 → 경보 없음."""
         result = engine.evaluate([_det(0.3)], raw_distance_cm=200.0)
         assert result.risk_level == RiskLevel.NONE
-        assert result.tof_only_mode is True
+        assert result.tof_only_mode is False
 
-    def test_low_conf_danger_distance_is_tof_high(self, engine: FusionEngine) -> None:
-        """낮은 신뢰도 탐지 + 위험 거리 → ToF 단독 HIGH는 정당 경보 (오탐지 아님)."""
+    def test_low_conf_danger_distance_is_high(self, engine: FusionEngine) -> None:
+        """낮은 신뢰도 탐지 + 위험 거리 → HIGH는 정당 경보 (오탐지 아님)."""
         result = engine.evaluate([_det(0.3)], raw_distance_cm=80.0)
         assert result.risk_level == RiskLevel.HIGH
-        assert result.tof_only_mode is True
+        assert result.tof_only_mode is False
 
-    def test_conf_just_below_threshold_is_tof_only(self, engine: FusionEngine) -> None:
-        """MIN_CONFIDENCE - 0.01(=0.39) 신뢰도 → tof_only=True, 안전 거리면 NONE."""
+    def test_low_conf_mid_distance_is_suppressed(self, engine: FusionEngine) -> None:
+        """낮은 신뢰도 탐지 + MID 거리 → 억제하고 카운터만 올린다."""
+        result = engine.evaluate([_det(0.3)], raw_distance_cm=120.0)
+        assert result.risk_level == RiskLevel.NONE
+        assert result.mid_suppressed is True
+
+    def test_conf_just_below_threshold_is_not_valid(self, engine: FusionEngine) -> None:
+        """MIN_CONFIDENCE - 0.01(=0.39) 신뢰도 → 유효 탐지 아님, 안전 거리면 NONE."""
         result = engine.evaluate(
             [_det(config.MIN_CONFIDENCE - 0.01)], raw_distance_cm=200.0
         )
-        assert result.tof_only_mode is True
+        assert result.tof_only_mode is False
         assert result.risk_level == RiskLevel.NONE
 
 
@@ -74,11 +83,12 @@ class TestConfidenceBoundary:
         assert result.risk_level == RiskLevel.HIGH
         assert result.tof_only_mode is False
 
-    def test_just_below_min_confidence_is_tof_only(self, engine: FusionEngine) -> None:
-        """conf=0.39 (MIN_CONFIDENCE 미달) → tof_only=True, ToF 단독 HIGH."""
+    def test_just_below_min_confidence_is_not_valid(self, engine: FusionEngine) -> None:
+        """conf=0.39 (MIN_CONFIDENCE 미달) → 유효 탐지 아님. 근접이라 HIGH는 남는다."""
         result = engine.evaluate([_det(0.39)], raw_distance_cm=90.0)
-        assert result.tof_only_mode is True
+        assert result.tof_only_mode is False
         assert result.risk_level == RiskLevel.HIGH
+        assert result.top_label is None
 
     def test_min_confidence_at_safe_distance_no_alert(self, engine: FusionEngine) -> None:
         """conf=0.40 + 안전 거리 → 정상 퓨전 모드, 경보 없음."""
@@ -118,10 +128,10 @@ class TestMultiObjectFalsePositive:
         assert result.risk_level == RiskLevel.HIGH
         assert result.tof_only_mode is False
 
-    def test_all_below_threshold_is_tof_only(self, engine: FusionEngine) -> None:
-        """[conf=0.35, conf=0.30] 모두 임계값 미달 → tof_only=True, ToF 단독 HIGH."""
+    def test_all_below_threshold_is_not_valid(self, engine: FusionEngine) -> None:
+        """[conf=0.35, conf=0.30] 모두 임계값 미달 → 유효 탐지 없음. 근접이라 HIGH."""
         result = engine.evaluate([_det(0.35), _det(0.30)], raw_distance_cm=80.0)
-        assert result.tof_only_mode is True
+        assert result.tof_only_mode is False
         assert result.risk_level == RiskLevel.HIGH
 
 
@@ -134,7 +144,7 @@ class TestBackgroundNoiseSuppression:
         for i in range(5):
             result = engine.evaluate([_det(0.3)], raw_distance_cm=200.0)
             assert result.risk_level == RiskLevel.NONE, f"호출 {i + 1}회차: NONE 기대"
-            assert result.tof_only_mode is True, f"호출 {i + 1}회차: tof_only=True 기대"
+            assert result.tof_only_mode is False, f"호출 {i + 1}회차: tof_only=False 기대"
 
     def test_repeated_low_conf_after_reset_still_none(self, engine: FusionEngine) -> None:
         """3회 호출 후 reset_filter() → 이후 2회도 NONE 유지."""
@@ -147,7 +157,7 @@ class TestBackgroundNoiseSuppression:
         for i in range(2):
             result = engine.evaluate([_det(0.3)], raw_distance_cm=200.0)
             assert result.risk_level == RiskLevel.NONE, f"리셋 후 {i + 1}회차: NONE 기대"
-            assert result.tof_only_mode is True, f"리셋 후 {i + 1}회차: tof_only=True 기대"
+            assert result.tof_only_mode is False, f"리셋 후 {i + 1}회차: tof_only=False 기대"
 
 
 class TestBeepControllerFalsePositive:

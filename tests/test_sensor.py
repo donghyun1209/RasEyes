@@ -111,3 +111,15 @@ class TestMockToFSensorSequence:
         sensor.start()
         with pytest.raises(ValueError):
             sensor.set_sequence([])
+
+
+def test_mock_sample_seq_advances_per_read() -> None:
+    """Mock은 "읽기 1회 = 새 샘플 1개" 모델이므로 시퀀스가 읽을 때마다 전진한다."""
+    sensor = MockToFSensor(distance_cm=[100.0, 150.0])
+    sensor.start()
+
+    assert sensor.sample_seq == 0
+    sensor.read_distance_cm()
+    assert sensor.sample_seq == 1
+    sensor.read_distance_cm()
+    assert sensor.sample_seq == 2

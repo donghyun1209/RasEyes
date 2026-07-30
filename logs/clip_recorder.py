@@ -107,19 +107,17 @@ class ClipRecorder:
             self._check_pending_deadline(now)
 
     def trigger(self, now: float, result: FusionResult) -> bool:
-        """HIGH 경보 시점의 링 버퍼를 스냅샷하고 후속 수집을 시작한다.
+        """HIGH 경보 시점의 프레임 1장만 저장하도록 트리거한다.
 
         쿨다운(CLIP_COOLDOWN_SEC) 중이면 억제 카운터만 증가시킨다. 억제 횟수는
-        다음 클립의 `suppressed_high_since_prev_clip`에 기록된다 — 덤프는
-        트리거 + CLIP_POST_SEC 시점에 일어나는데 쿨다운은 그보다 길어서, 자기
-        클립의 쿨다운 구간 억제 수를 자기 meta에 담는 것이 불가능하기 때문이다.
+        다음 클립의 `suppressed_high_since_prev_clip`에 기록된다.
 
         Args:
             now: 현재 단조 시각 (time.monotonic()).
             result: HIGH로 판정된 퓨전 결과.
 
         Returns:
-            True이면 새 클립 수집을 시작했고, False이면 쿨다운으로 억제되었다.
+            True이면 새 클립을 저장했고, False이면 쿨다운으로 억제되었다.
         """
         if now - self._last_trigger_at < config.CLIP_COOLDOWN_SEC:
             self._suppressed += 1
@@ -127,9 +125,16 @@ class ClipRecorder:
 
         self._last_trigger_at = now
         label = result.top_label or _UNKNOWN_LABEL
+
+        # 트리거 순간의 프레임은 링 버퍼의 가장 최근 항목
+        trigger_frame = list(self._buffer)[-1] if self._buffer else None
+        if trigger_frame is None:
+            logger.warning("이벤트 클립: 버퍼가 비어있음 — 프레임 저장 불가")
+            return False
+
         self._pending = {
-            "frames": list(self._buffer),
-            "deadline": now + config.CLIP_POST_SEC,
+            "frames": [trigger_frame],
+            "deadline": now,
             "trigger_now": now,
             "dir_name": "{}_{}_{}cm".format(
                 datetime.datetime.now().strftime("%Y%m%d_%H%M%S"),
@@ -147,8 +152,8 @@ class ClipRecorder:
             "suppressed_high_since_prev_clip": self._suppressed,
         }
         self._suppressed = 0
-        logger.info("이벤트 클립 트리거: %s (버퍼 %d프레임)",
-                    self._pending["dir_name"], len(self._pending["frames"]))
+        logger.info("이벤트 클립 트리거: %s (트리거 순간 프레임만)",
+                    self._pending["dir_name"])
         return True
 
     def rotate(self) -> None:
@@ -239,15 +244,15 @@ class ClipRecorder:
         self._dump_thread.start()
 
     def _dump(self, pending: Dict[str, Any]) -> None:
-        """클립 폴더에 JPEG 시퀀스와 meta.json을 기록한 뒤 rotation을 수행한다."""
+        """트리거 순간 프레임 1장과 meta.json을 기록한 뒤 rotation을 수행한다."""
         try:
             target = Path(self._clip_dir) / pending["dir_name"]
             target.mkdir(parents=True, exist_ok=True)
 
             trigger_now = pending["trigger_now"]
             frame_meta: List[Dict[str, Any]] = []
-            for index, item in enumerate(pending["frames"]):
-                name = "{:03d}.jpg".format(index)
+            for item in pending["frames"]:
+                name = "trigger.jpg"
                 (target / name).write_bytes(item["jpeg"])
                 frame_meta.append(
                     {
@@ -262,19 +267,13 @@ class ClipRecorder:
 
             meta = {
                 "trigger": pending["meta"],
-                "config": {
-                    "pre_sec": config.CLIP_PRE_SEC,
-                    "post_sec": config.CLIP_POST_SEC,
-                    "buffer_fps": config.CLIP_BUFFER_FPS,
-                    "jpeg_quality": config.CLIP_JPEG_QUALITY,
-                },
                 "suppressed_high_since_prev_clip": pending["suppressed_high_since_prev_clip"],
-                "frames": frame_meta,
+                "frame": frame_meta[0] if frame_meta else None,
             }
             (target / "meta.json").write_text(
                 json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
             )
-            logger.info("이벤트 클립 저장: %s (%d프레임)", target, len(frame_meta))
+            logger.info("이벤트 클립 저장: %s", target)
         except Exception as exc:  # 클립 저장 실패가 장애물 경고 본기능을 죽이면 안 된다
             logger.error("이벤트 클립 저장 실패: %s", exc)
 

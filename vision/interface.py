@@ -35,6 +35,15 @@ class BaseCameraHAL(ABC):
         """카메라 리소스를 해제한다."""
         ...
 
+    @property
+    def ae_settled(self) -> bool:
+        """자동 노출이 더 이상 조정 중이 아닌지 여부.
+
+        AE 루프를 가진 구현체만 재정의한다. 노출 제어가 없는 카메라는 조정할 것이
+        없으므로 항상 True다.
+        """
+        return True
+
 
 @dataclass
 class DetectionResult:
@@ -85,6 +94,16 @@ class VisionInterface(ABC):
             value: 새 신뢰도 하한 (0.0 ~ 1.0).
         """
         ...
+
+    @property
+    def ae_settled(self) -> bool:
+        """카메라 자동 노출이 더 이상 조정 중이 아닌지 여부.
+
+        AE를 가진 카메라를 소유한 구현체만 재정의한다. 기본값 True는 "노출 조정
+        때문에 프레임을 붙들 이유가 없다"는 뜻이고, 호출자는 이 값이 False인 동안
+        저전력 모드 진입을 미룬다.
+        """
+        return True
 
     @abstractmethod
     def stop(self) -> None:

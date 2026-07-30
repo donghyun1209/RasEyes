@@ -56,6 +56,11 @@ class MockToFSensor(BaseToFHAL):
         self._index += 1
         return value
 
+    @property
+    def sample_seq(self) -> int:
+        """읽기 횟수를 그대로 시퀀스로 쓴다 (Mock은 호출 1회 = 새 샘플 1개)."""
+        return self._index
+
     def set_distance(self, distance_cm: float) -> None:
         """고정 거리값으로 재설정하고 인덱스를 초기화한다."""
         self._sequence = [float(distance_cm)]

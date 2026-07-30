@@ -151,6 +151,15 @@ def summarize(session: Session) -> Dict[str, float]:
     tof_raws = [_parse_float(r.get("tof_raw_cm", "")) for r in rows if r.get("tof_raw_cm")]
     tof_only = [_parse_float(r.get("tof_only_ratio", "")) for r in rows if r.get("tof_only_ratio")]
 
+    # 아래 3개는 노출 제어 도입(v2.0 Phase 5-1) 이후 세션에만 존재한다.
+    # ⚠️ 결측을 0.0으로 집계하면 예전 아카이브가 "전부 암흑"으로 오독되어 날짜 간
+    #    비교가 통째로 망가진다. 반드시 값이 있는 행만 골라 쓰고, 없으면 미측정으로 표시한다.
+    lumas = [_parse_float(r.get("frame_luma", "")) for r in rows if r.get("frame_luma")]
+    no_detect = [
+        _parse_float(r.get("no_detect_ratio", "")) for r in rows if r.get("no_detect_ratio")
+    ]
+    mid_suppressed = sum(int(_parse_float(r.get("mid_suppressed", ""))) for r in rows)
+
     minutes = session.duration_sec / 60.0
     return {
         "rows": float(len(rows)),
@@ -188,6 +197,19 @@ def summarize(session: Session) -> Dict[str, float]:
         ),
         "tof_only_ratio": statistics.fmean(tof_only) if tof_only else 0.0,
         "has_diagnostics": 1.0 if tof_raws else 0.0,
+        "luma_mean": statistics.fmean(lumas) if lumas else 0.0,
+        "luma_dark_ratio": (
+            sum(1 for v in lumas if v < config.VISION_BLIND_LUMA_MIN) / len(lumas)
+            if lumas else 0.0
+        ),
+        "luma_blown_ratio": (
+            sum(1 for v in lumas if v > config.VISION_BLIND_LUMA_MAX) / len(lumas)
+            if lumas else 0.0
+        ),
+        "no_detect_ratio": statistics.fmean(no_detect) if no_detect else 0.0,
+        "mid_suppressed": float(mid_suppressed),
+        "mid_suppressed_per_min": mid_suppressed / minutes if minutes > 0 else 0.0,
+        "has_exposure_diag": 1.0 if lumas else 0.0,
     }
 
 
@@ -222,6 +244,20 @@ def print_report(session: Session, stats: Dict[str, float]) -> None:
             stats["tof_only_ratio"]))
     else:
         print("  경보 발화 : (진단 컬럼 없음 — 경보 정책 도입 이전 세션)")
+    if stats["has_exposure_diag"]:
+        # 노출이 실제로 맞고 있는지가 5-1의 완료 판정이다.
+        unusable = stats["luma_dark_ratio"] + stats["luma_blown_ratio"]
+        luma_flag = " ⚠ 노출 제어 실패 의심" if unusable > 0.3 else ""
+        print("  프레임 밝기: 평균 {:.0f} | 암흑 {:.1%} / 화이트아웃 {:.1%}{}".format(
+            stats["luma_mean"], stats["luma_dark_ratio"],
+            stats["luma_blown_ratio"], luma_flag))
+        print("  탐지 없음 : {:.1%} (프레임에서 아무것도 못 찾은 사이클 비율)".format(
+            stats["no_detect_ratio"]))
+        # 억제한 MID가 실제 장애물이었는지는 사람이 클립으로 확인해야 한다.
+        print("  MID 억제  : {:.0f}회 | 분당 {:.2f}회 (비전 정상 + 탐지 0개로 걸러낸 경보)".format(
+            stats["mid_suppressed"], stats["mid_suppressed_per_min"]))
+    else:
+        print("  프레임 밝기: (미측정 — 노출 제어 도입 이전 세션)")
     print("  가림 경고 : {:.0f}회".format(stats["occlusions"]))
 
 

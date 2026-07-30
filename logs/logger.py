@@ -25,6 +25,7 @@ class CsvLogger:
         "timestamp", "cpu_temp", "fps", "tof_distance_cm", "alert_triggered",
         "latency_ms", "tts_spoken", "occlusion_alerts",
         "alerts_emitted", "tof_raw_cm", "tof_only_ratio",
+        "frame_luma", "no_detect_ratio", "mid_suppressed",
     ]
 
     def __init__(self, path: Optional[str] = None) -> None:
@@ -87,6 +88,9 @@ class CsvLogger:
         alerts_emitted: int = 0,
         tof_raw_cm: float = 0.0,
         tof_only_ratio: float = 0.0,
+        frame_luma: Optional[float] = None,
+        no_detect_ratio: float = 0.0,
+        mid_suppressed: int = 0,
     ) -> None:
         """현재 운영 데이터를 한 행으로 기록한다.
 
@@ -102,6 +106,12 @@ class CsvLogger:
             tof_raw_cm: 필터 이전 ToF 원시 거리 (cm). OoR 비율·노이즈 사후 분석용.
             tof_only_ratio: 이 로그 주기에서 ToF 단독 모드였던 사이클 비율 (0.0~1.0).
                 비전이 실명한 정도를 나타내며, 경보 감소가 개선인지 실명인지 구별하는 데 쓴다.
+            frame_luma: 마지막 프레임의 평균 휘도 (0~255). 노출 건강도 지표로,
+                화이트아웃/암흑 프레임 비율을 사후 산출하는 근거다. 측광 불가 시 None.
+            no_detect_ratio: 이 로그 주기에서 탐지가 0개였던 사이클 비율 (0.0~1.0).
+                tof_only_ratio가 실명 전용이 되면서 빠진 "탐지 밀도"를 대신 담는다.
+            mid_suppressed: 비전이 정상인데 탐지가 없어 MID 경보를 억제한 횟수 (증가분).
+                억제로 놓친 장애물이 있었는지 사후 검증할 유일한 수단이다.
 
         Raises:
             RuntimeError: open() 미호출 시.
@@ -121,6 +131,9 @@ class CsvLogger:
                 "alerts_emitted": alerts_emitted,
                 "tof_raw_cm": round(tof_raw_cm, 2),
                 "tof_only_ratio": round(tof_only_ratio, 3),
+                "frame_luma": "" if frame_luma is None else round(frame_luma, 1),
+                "no_detect_ratio": round(no_detect_ratio, 3),
+                "mid_suppressed": mid_suppressed,
             }
         )
         self._unflushed_rows += 1

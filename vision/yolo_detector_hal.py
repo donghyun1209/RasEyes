@@ -57,6 +57,11 @@ class YoloDetector(VisionInterface):
         """현재 적용 중인 신뢰도 하한을 반환한다."""
         return self._conf_threshold
 
+    @property
+    def ae_settled(self) -> bool:
+        """카메라의 AE 수렴 상태를 그대로 전달한다."""
+        return self._camera.ae_settled
+
     def start(self) -> None:
         """카메라를 시작하고 YOLO 모델을 로드한다.
 

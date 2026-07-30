@@ -25,6 +25,21 @@ class BaseToFHAL(ABC):
         """
         ...
 
+    @property
+    @abstractmethod
+    def sample_seq(self) -> int:
+        """물리 측정이 갱신될 때마다 증가하는 카운터.
+
+        `read_distance_cm()`은 캐시를 즉시 반환하므로 새 측정이 없으면 같은 값을
+        반복해서 내놓는다. 값만 봐서는 "정말 안 움직인 것"과 "아직 새 측정이
+        없는 것"을 구별할 수 없어, 호출자가 중복 샘플을 걸러낼 수 있도록 시퀀스를
+        노출한다. 이게 없으면 이동평균 버퍼가 같은 샘플로 채워져 평활 효과가 사라진다.
+
+        Returns:
+            단조 증가하는 샘플 시퀀스 번호.
+        """
+        ...
+
     @abstractmethod
     def stop(self) -> None:
         """센서 리소스를 해제한다."""

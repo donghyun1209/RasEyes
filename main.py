@@ -219,6 +219,50 @@ def _should_fps_fallback(
     return effective_fps < config.FPS_FALLBACK_THRESHOLD
 
 
+def _update_luma_blind(
+    luma: Optional[float], blind: bool, streak: int
+) -> Tuple[bool, int]:
+    """프레임 밝기로 카메라 실명 여부를 갱신한다.
+
+    암흑과 화이트아웃을 모두 실명으로 본다 — 어느 쪽이든 카메라가 장면을 보지
+    못하는 상태다. 판정이 깜빡이면 곤란해 두 겹으로 막는다:
+
+    - **히스테리시스**: 일단 실명으로 판정되면 밴드 안쪽 깊숙이 들어와야 풀린다.
+      경계에 걸친 밝기가 진동하는 것을 흡수한다.
+    - **디바운스**: 상태를 뒤집으려면 연속 N프레임 동안 같은 판정이 나와야 한다.
+      AE 수렴 과도기(1~2초)에 모드가 왔다 갔다 하며 MID 경보가 되살아나는 것을 막는다.
+
+    Args:
+        luma: 이번 사이클의 평균 휘도. None이면(Mock 모드 등 측광 불가) 상태를 유지한다.
+        blind: 현재 실명 판정 상태.
+        streak: 현재 판정과 반대되는 관측이 연속으로 나온 횟수.
+
+    Returns:
+        (갱신된 실명 상태, 갱신된 연속 카운터).
+    """
+    if luma is None:
+        return blind, streak
+
+    if blind:
+        # 해제하려면 밴드 안쪽으로 히스테리시스만큼 더 들어와야 한다
+        observed = not (
+            config.VISION_BLIND_LUMA_MIN + config.VISION_BLIND_HYSTERESIS_LUMA
+            <= luma
+            <= config.VISION_BLIND_LUMA_MAX - config.VISION_BLIND_HYSTERESIS_LUMA
+        )
+    else:
+        observed = not (
+            config.VISION_BLIND_LUMA_MIN <= luma <= config.VISION_BLIND_LUMA_MAX
+        )
+
+    if observed == blind:
+        return blind, 0
+    streak += 1
+    if streak >= config.VISION_BLIND_DEBOUNCE_FRAMES:
+        return observed, 0
+    return blind, streak
+
+
 def _put_latest(q: "queue.Queue", item: object) -> None:
     """큐에 최신 항목만 유지한다. 가득 차면 기존 항목을 버리고 교체."""
     try:
@@ -297,7 +341,7 @@ def _vision_worker(
 def _sensor_worker(
     sensor: BaseToFHAL,
     stop_event: threading.Event,
-    out_q: "queue.Queue[Tuple[float, float]]",
+    out_q: "queue.Queue[Tuple[float, int, float]]",
     on_reinit: Optional[Callable[[], None]] = None,
 ) -> None:
     """ToF 거리 읽기를 별도 스레드에서 실행하고 결과를 큐에 넣는다.
@@ -305,7 +349,11 @@ def _sensor_worker(
     Args:
         sensor: ToF HAL 인터페이스.
         stop_event: 종료 신호 이벤트.
-        out_q: (timestamp, distance_cm) 튜플을 담는 출력 큐.
+        out_q: (timestamp, sample_seq, distance_cm) 튜플을 담는 출력 큐.
+            타임스탬프는 큐에 넣은 시각이라 중복 판별에 쓸 수 없다 — 이 워커는
+            HAL 캐시를 TARGET_FPS(15Hz)로 재읽기하는데 실제 측정은 ~4.8Hz라
+            같은 값이 반복해서 실린다. 소비자가 걸러낼 수 있도록 HAL의 샘플
+            시퀀스를 함께 싣는다.
         on_reinit: 센서 재초기화 성공 시 호출할 콜백 (예: 필터 리셋).
     """
     interval = 1.0 / config.TARGET_FPS
@@ -313,7 +361,7 @@ def _sensor_worker(
     while not stop_event.is_set():
         try:
             distance = sensor.read_distance_cm()
-            _put_latest(out_q, (time.monotonic(), distance))
+            _put_latest(out_q, (time.monotonic(), sensor.sample_seq, distance))
             consecutive_failures = 0
         except Exception as exc:
             consecutive_failures += 1
@@ -503,6 +551,7 @@ class RasEyesApp:
         # 데이터 최신성 추적용 타임스탬프 (None = 아직 데이터 없음)
         last_vision_ts: Optional[float] = None
         last_sensor_ts: Optional[float] = None
+        last_sensor_seq: int = -1
 
         # 실측 FPS 상태 (메인 루프 + 비전 워커 별도 추적)
         actual_fps: float = float(config.TARGET_FPS)
@@ -534,9 +583,16 @@ class RasEyesApp:
         # 7: TTS 로그 주기 내 마지막 발화 텍스트 추적
         _last_tts_text: str = ""
 
+        # 5-2: 비전 신뢰 불가 판정 상태 (밝기 밴드 + 디바운스)
+        frame_luma: Optional[float] = None
+        vision_blind: bool = False
+        _blind_streak: int = 0
+
         # 로그 주기별 진단 카운터 — 경보가 줄어든 것인지 센서가 실명한 것인지 구별하기 위함
         _alerts_emitted: int = 0
         _tof_only_cycles: int = 0
+        _no_detect_cycles: int = 0
+        _mid_suppressed: int = 0
         _total_cycles: int = 0
 
         while not self._stop_event.is_set():
@@ -572,15 +628,20 @@ class RasEyesApp:
                 last_vision_ts = vision_ts
                 last_frame_ts = vision_ts
 
-                # 5-3: 카메라 가림 감지 — N프레임마다 1회, 다운샘플링한 프레임으로 픽셀 변화량 분석 (CPU 절감)
+                # 다운샘플 프레임 1장으로 밝기 측정과 가림 감지를 함께 처리한다.
+                # 밝기는 매 사이클 필요하고(5-2 실명 판정) 가림은 N프레임에 1회면
+                # 충분하지만, 리사이즈 비용은 한 번만 내면 된다.
                 if not self._use_mock and last_frame is not None:
+                    small_frame = cv2.resize(
+                        last_frame,
+                        (config.CAMERA_OCCLUSION_DOWNSCALE_WIDTH, config.CAMERA_OCCLUSION_DOWNSCALE_HEIGHT),
+                    )
+                    frame_luma = cv2.mean(cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY))[0]
+
+                    # 5-3: 카메라 가림 감지 — N프레임마다 1회만 픽셀 변화량 분석 (CPU 절감)
                     _occlusion_frame_counter += 1
                     if _occlusion_frame_counter >= config.CAMERA_OCCLUSION_CHECK_INTERVAL_FRAMES:
                         _occlusion_frame_counter = 0
-                        small_frame = cv2.resize(
-                            last_frame,
-                            (config.CAMERA_OCCLUSION_DOWNSCALE_WIDTH, config.CAMERA_OCCLUSION_DOWNSCALE_HEIGHT),
-                        )
                         if _prev_frame is not None:
                             delta = cv2.mean(cv2.absdiff(small_frame, _prev_frame))[0]
                             if delta < config.CAMERA_OCCLUSION_CHANGE_THRESH:
@@ -590,9 +651,15 @@ class RasEyesApp:
                         _prev_frame = small_frame
             except queue.Empty:
                 pass
+            # 큐가 비어 직전 거리를 재사용하거나, 같은 물리 측정이 다시 실려 온
+            # 경우에는 필터를 전진시키지 않는다 (이동평균이 동일 샘플로 채워지는 것 방지)
+            distance_is_new = False
             try:
-                sensor_ts, last_distance = self._sensor_q.get_nowait()
+                sensor_ts, sensor_seq, last_distance = self._sensor_q.get_nowait()
                 last_sensor_ts = sensor_ts
+                if sensor_seq != last_sensor_seq:
+                    last_sensor_seq = sensor_seq
+                    distance_is_new = True
             except queue.Empty:
                 pass
 
@@ -616,9 +683,18 @@ class RasEyesApp:
                     now - last_sensor_ts,
                 )
                 last_distance = float(config.MID_RISK_DIST_CM) + 1.0
+                # 안전 거리로 되돌리려면 필터를 실제로 밀어야 한다 — 게이트에 걸려
+                # 갱신되지 않으면 만료 이전의 거리가 그대로 남아 경보가 계속 나간다
+                distance_is_new = True
 
-            # 다이내믹 FPS: 근접 물체가 없으면 비전 워커를 저전력 모드로 전환
-            if last_distance > config.DYNAMIC_FPS_NO_OBSTACLE_DIST_CM:
+            # 다이내믹 FPS: 근접 물체가 없으면 비전 워커를 저전력 모드로 전환.
+            # 단 AE가 노출을 조정하는 중이면 미룬다 — 저전력 4 FPS에서는 프레임이
+            # 250ms 간격으로만 들어와 수렴이 배로 느려지는데, 그 구간이 정확히
+            # 그늘→직사광 전환처럼 AE가 가장 급한 순간이다.
+            if (
+                last_distance > config.DYNAMIC_FPS_NO_OBSTACLE_DIST_CM
+                and self._vision.ae_settled
+            ):
                 if not self._low_power_event.is_set():
                     logger.info(
                         "전방 %.0fcm 이내 물체 없음, 저전력 모드 진입 (%d FPS)",
@@ -635,7 +711,7 @@ class RasEyesApp:
                 self._low_power_event.clear()
 
             # 비전 워커 Watchdog 체크
-            self._check_vision_stall()
+            vision_stalled = self._check_vision_stall()
 
             # FPS 기준 미달 시 ToF 단독 모드 Fallback (의도적 저FPS는 제외 — 헬퍼 참조)
             effective_fps = min(actual_fps, vision_fps)
@@ -661,10 +737,22 @@ class RasEyesApp:
                 )
                 fps_fallback_active = False
 
+            # 5-2: 비전을 신뢰할 수 없는 상태를 하나로 합성한다.
+            # 밝기가 밴드를 벗어난 경우(암흑·화이트아웃)뿐 아니라 FPS fallback과
+            # 비전 stall도 포함해야 한다 — 두 경우 모두 위에서 last_detections를
+            # 비우거나 낡은 값을 쓰고 있어서, "비전 정상 + 탐지 0개"로 오독하면
+            # 비전이 죽은 바로 그 순간 MID 안전망이 꺼진다.
+            vision_blind, _blind_streak = _update_luma_blind(
+                frame_luma, vision_blind, _blind_streak
+            )
+            vision_unreliable = vision_blind or fps_fallback_active or vision_stalled
+
             result = self._fusion.evaluate(
                 last_detections,
                 last_distance,
                 min_confidence=self._vision.conf_threshold,
+                vision_blind=vision_unreliable,
+                distance_is_new=distance_is_new,
             )
 
             # 시스템 경고(배터리 등)와 퓨전 결과를 병합해 단일 오디오 채널로 직렬화
@@ -685,6 +773,10 @@ class RasEyesApp:
             _total_cycles += 1
             if result.tof_only_mode:
                 _tof_only_cycles += 1
+            if not last_detections:
+                _no_detect_cycles += 1
+            if result.mid_suppressed:
+                _mid_suppressed += 1
 
             # TTS 발화 상태 1회 조회 — 비프음 suppress 및 NPU 스로틀링 이벤트에 공용 사용
             tts_speaking = self._tts.is_speaking()
@@ -794,6 +886,11 @@ class RasEyesApp:
                         tof_only_ratio=(
                             _tof_only_cycles / _total_cycles if _total_cycles else 0.0
                         ),
+                        frame_luma=frame_luma,
+                        no_detect_ratio=(
+                            _no_detect_cycles / _total_cycles if _total_cycles else 0.0
+                        ),
+                        mid_suppressed=_mid_suppressed,
                     )
                 except Exception as exc:
                     logger.error("CSV 로그 기록 실패: %s", exc)
@@ -801,6 +898,8 @@ class RasEyesApp:
                 _occlusion_alert_count = 0
                 _alerts_emitted = 0
                 _tof_only_cycles = 0
+                _no_detect_cycles = 0
+                _mid_suppressed = 0
                 _total_cycles = 0
                 last_log_time = now
 

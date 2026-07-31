@@ -117,20 +117,24 @@ class ClipRecorder:
             result: HIGH로 판정된 퓨전 결과.
 
         Returns:
-            True이면 새 클립을 저장했고, False이면 쿨다운으로 억제되었다.
+            True이면 새 클립을 저장했고, False이면 쿨다운으로 억제되었거나
+            저장할 프레임이 없었다.
         """
         if now - self._last_trigger_at < config.CLIP_COOLDOWN_SEC:
             self._suppressed += 1
             return False
 
-        self._last_trigger_at = now
-        label = result.top_label or _UNKNOWN_LABEL
-
-        # 트리거 순간의 프레임은 링 버퍼의 가장 최근 항목
-        trigger_frame = list(self._buffer)[-1] if self._buffer else None
+        # 트리거 순간의 프레임은 링 버퍼의 가장 최근 항목.
+        # 쿨다운 갱신보다 먼저 검사한다 — 저장하지 못한 트리거가 쿨다운을
+        # 소모하면 뒤이은 진짜 HIGH가 30초간 클립 없이 지나간다.
+        trigger_frame = self._buffer[-1] if self._buffer else None
         if trigger_frame is None:
             logger.warning("이벤트 클립: 버퍼가 비어있음 — 프레임 저장 불가")
+            self._suppressed += 1
             return False
+
+        self._last_trigger_at = now
+        label = result.top_label or _UNKNOWN_LABEL
 
         self._pending = {
             "frames": [trigger_frame],

@@ -79,8 +79,8 @@ class TestSampling:
 
 
 class TestTriggerAndDump:
-    def test_dump_writes_frames_and_meta(self, recorder, frame, tmp_path) -> None:
-        """HIGH 트리거 후 후속 구간까지 수집하면 폴더에 JPEG와 meta.json이 기록된다."""
+    def test_dump_writes_trigger_frame_and_meta(self, recorder, frame, tmp_path) -> None:
+        """HIGH 트리거 시 트리거 순간 프레임 1장과 meta.json만 기록된다."""
         detections = [DetectionResult(label="chair", confidence=0.82, bbox=(10, 20, 110, 220))]
         _feed(recorder, frame, 0.0, 5.0, detections=detections)
         assert recorder.trigger(5.0, _high_result()) is True
@@ -94,17 +94,15 @@ class TestTriggerAndDump:
 
         meta = json.loads((clip / "meta.json").read_text(encoding="utf-8"))
         jpgs = sorted(clip.glob("*.jpg"))
-        assert len(jpgs) == len(meta["frames"])
-        assert len(jpgs) >= int(config.CLIP_BUFFER_FPS * config.CLIP_PRE_SEC)
-        assert jpgs[0].name == "000.jpg"
+        assert [p.name for p in jpgs] == ["trigger.jpg"]
         assert jpgs[0].stat().st_size > 0
 
         assert meta["trigger"]["risk_level"] == "HIGH"
         assert meta["trigger"]["label"] == "chair"
         assert meta["trigger"]["tof_only_mode"] is False
-        # 이벤트 전 구간은 음수 오프셋, 후 구간은 양수 오프셋
-        offsets = [f["offset_sec"] for f in meta["frames"]]
-        assert min(offsets) < 0 < max(offsets)
+        # 저장 대상은 트리거 시점 이전(또는 동시)에 찍힌 링 버퍼의 마지막 프레임
+        assert meta["frame"]["file"] == "trigger.jpg"
+        assert meta["frame"]["offset_sec"] <= 0
 
     def test_meta_has_both_tof_distances_and_detections(self, recorder, frame, tmp_path) -> None:
         """프레임 메타에 원시/필터 ToF 거리와 탐지 결과(label·bbox·confidence)가 담긴다."""
@@ -116,7 +114,7 @@ class TestTriggerAndDump:
 
         clip = next(p for p in tmp_path.iterdir() if p.is_dir())
         meta = json.loads((clip / "meta.json").read_text(encoding="utf-8"))
-        first = meta["frames"][0]
+        first = meta["frame"]
         assert first["raw_distance_cm"] == pytest.approx(95.5)
         assert first["filtered_distance_cm"] == pytest.approx(91.25)
         assert first["detections"][0]["label"] == "person"
@@ -153,17 +151,34 @@ class TestTriggerAndDump:
 
 
 class TestCooldown:
-    def test_repeat_high_suppressed_within_cooldown(self, recorder) -> None:
+    def test_repeat_high_suppressed_within_cooldown(self, recorder, frame) -> None:
         """쿨다운 중 HIGH는 새 클립을 만들지 않고 억제 카운터만 증가시킨다."""
+        recorder.offer_frame(0.0, frame, 0.0, [], 90.0, 88.0)
         assert recorder.trigger(0.0, _high_result()) is True
         assert recorder.trigger(1.0, _high_result()) is False
         assert recorder.trigger(config.CLIP_COOLDOWN_SEC - 0.1, _high_result()) is False
         assert recorder._suppressed == 2
 
-    def test_trigger_allowed_after_cooldown(self, recorder) -> None:
+    def test_trigger_allowed_after_cooldown(self, recorder, frame) -> None:
         """쿨다운이 지나면 다시 트리거된다."""
+        recorder.offer_frame(0.0, frame, 0.0, [], 90.0, 88.0)
         assert recorder.trigger(0.0, _high_result()) is True
-        assert recorder.trigger(config.CLIP_COOLDOWN_SEC, _high_result()) is True
+
+        later = config.CLIP_COOLDOWN_SEC
+        recorder.offer_frame(later, frame, later, [], 90.0, 88.0)
+        assert recorder.trigger(later, _high_result()) is True
+
+    def test_empty_buffer_does_not_consume_cooldown(self, recorder, frame) -> None:
+        """저장할 프레임이 없어 실패한 트리거는 쿨다운을 소모하지 않는다.
+
+        소모하면 카메라가 잠깐 멈춘 사이의 HIGH 하나가 뒤이은 30초를 통째로
+        막아, 실제 위험 순간의 클립이 남지 않는다.
+        """
+        assert recorder.trigger(0.0, _high_result()) is False
+        assert recorder._suppressed == 1  # 놓친 HIGH도 집계에는 남는다
+
+        recorder.offer_frame(0.1, frame, 0.1, [], 90.0, 88.0)
+        assert recorder.trigger(0.1, _high_result()) is True
 
     def test_suppressed_count_recorded_in_next_clip(self, recorder, frame, tmp_path) -> None:
         """억제된 HIGH 횟수가 다음 클립 meta에 기록되고 카운터는 초기화된다."""
@@ -244,4 +259,5 @@ class TestMockModeIntegration:
         assert len(clips) == 1, "HIGH 경보가 지속됐는데 클립이 저장되지 않음"
         meta = json.loads((clips[0] / "meta.json").read_text(encoding="utf-8"))
         assert meta["trigger"]["risk_level"] == "HIGH"
-        assert len(list(clips[0].glob("*.jpg"))) == len(meta["frames"]) > 0
+        assert [p.name for p in clips[0].glob("*.jpg")] == ["trigger.jpg"]
+        assert meta["frame"]["file"] == "trigger.jpg"

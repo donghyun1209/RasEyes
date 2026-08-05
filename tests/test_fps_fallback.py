@@ -5,24 +5,46 @@ main.py가 "비전을 믿을 수 없다"고 판단하는 두 경로 — FPS 기�
 그것이 FusionEngine에 어떻게 반영되는지를 검증한다. 물리 하드웨어나 YOLO 모델 없이
 동작한다.
 """
+from typing import Tuple
+
 import config
 from fusion.engine import FusionEngine, RiskLevel
 from main import _should_fps_fallback, _update_luma_blind
 from vision.interface import DetectionResult
 
 
+def _feed_fps(
+    fps: float,
+    times: int,
+    *,
+    low_power: bool = False,
+    thermal_throttle: bool = False,
+    tts_active: bool = False,
+    active: bool = False,
+    streak: int = 0,
+) -> Tuple[bool, int]:
+    """같은 FPS를 N회 연속 넣는다 (TestLumaBlindDetection._feed와 같은 방식)."""
+    for _ in range(times):
+        active, streak = _should_fps_fallback(
+            fps, low_power, thermal_throttle, tts_active, active, streak
+        )
+    return active, streak
+
+
 def test_fps_below_threshold_triggers_fallback() -> None:
     """예기치 못한 FPS 미달은 ToF 단독 모드로 전환한다."""
-    assert _should_fps_fallback(
-        config.FPS_FALLBACK_THRESHOLD - 1, low_power=False, thermal_throttle=False
-    ) is True
+    active, _ = _feed_fps(
+        config.FPS_FALLBACK_THRESHOLD - 1, config.FPS_FALLBACK_DEBOUNCE_FRAMES
+    )
+    assert active is True
 
 
 def test_fps_above_threshold_keeps_detections() -> None:
     """FPS 임계값 이상이면 전환하지 않는다."""
-    assert _should_fps_fallback(
-        config.FPS_FALLBACK_THRESHOLD + 1, low_power=False, thermal_throttle=False
-    ) is False
+    active, _ = _feed_fps(
+        config.FPS_FALLBACK_THRESHOLD + 1, config.FPS_FALLBACK_DEBOUNCE_FRAMES
+    )
+    assert active is False
 
 
 def test_low_power_mode_does_not_trigger_fallback() -> None:
@@ -34,9 +56,12 @@ def test_low_power_mode_does_not_trigger_fallback() -> None:
     assert config.DYNAMIC_FPS_LOW_POWER_FPS < config.FPS_FALLBACK_THRESHOLD, (
         "이 테스트의 전제가 깨졌다 — 저전력 FPS가 임계값 이상이면 제외 로직이 불필요"
     )
-    assert _should_fps_fallback(
-        float(config.DYNAMIC_FPS_LOW_POWER_FPS), low_power=True, thermal_throttle=False
-    ) is False
+    active, _ = _feed_fps(
+        float(config.DYNAMIC_FPS_LOW_POWER_FPS),
+        config.FPS_FALLBACK_DEBOUNCE_FRAMES,
+        low_power=True,
+    )
+    assert active is False
 
 
 def test_thermal_throttle_does_not_trigger_fallback() -> None:
@@ -44,9 +69,31 @@ def test_thermal_throttle_does_not_trigger_fallback() -> None:
     assert config.THERMAL_THROTTLE_FPS < config.FPS_FALLBACK_THRESHOLD, (
         "이 테스트의 전제가 깨졌다 — 스로틀 FPS가 임계값 이상이면 제외 로직이 불필요"
     )
-    assert _should_fps_fallback(
-        float(config.THERMAL_THROTTLE_FPS), low_power=False, thermal_throttle=True
-    ) is False
+    active, _ = _feed_fps(
+        float(config.THERMAL_THROTTLE_FPS),
+        config.FPS_FALLBACK_DEBOUNCE_FRAMES,
+        thermal_throttle=True,
+    )
+    assert active is False
+
+
+def test_tts_active_does_not_trigger_fallback() -> None:
+    """TTS 발화 중 페이싱(8 FPS)을 고장으로 오인하지 않는다.
+
+    2026-08-05 회귀: TTS_ACTIVE_VISION_FPS가 임계값보다 '낮은' 게 아니라 정확히
+    같아서(둘 다 8) EMA 실측이 경계를 오르내렸다. 발화는 경보를 말하는 순간 —
+    즉 장애물이 잡힌 바로 그때 — 일어나므로, 제외하지 않으면 경보마다 비전이
+    실명 처리된다 (실측: 발화 0.85~1.1초 뒤 진입, 분당 9회 진입/해제).
+    """
+    assert config.TTS_ACTIVE_VISION_FPS <= config.FPS_FALLBACK_THRESHOLD, (
+        "이 테스트의 전제가 깨졌다 — TTS FPS가 임계값보다 높으면 제외 로직이 불필요"
+    )
+    active, _ = _feed_fps(
+        float(config.TTS_ACTIVE_VISION_FPS),
+        config.FPS_FALLBACK_DEBOUNCE_FRAMES,
+        tts_active=True,
+    )
+    assert active is False
 
 
 def test_real_stall_during_low_power_is_still_masked() -> None:
@@ -54,7 +101,61 @@ def test_real_stall_during_low_power_is_still_masked() -> None:
 
     비전 워커 Watchdog(`_check_vision_stall`)이 이 경우를 담당한다.
     """
-    assert _should_fps_fallback(0.0, low_power=True, thermal_throttle=False) is False
+    active, _ = _feed_fps(
+        0.0, config.FPS_FALLBACK_DEBOUNCE_FRAMES, low_power=True
+    )
+    assert active is False
+
+
+def test_debounce_prevents_single_dip() -> None:
+    """단발 FPS 하락으로 모드가 뒤집히면 안 된다."""
+    active, streak = _feed_fps(
+        config.FPS_FALLBACK_THRESHOLD - 1, config.FPS_FALLBACK_DEBOUNCE_FRAMES - 1
+    )
+    assert active is False
+
+    # 정상 FPS가 돌아오면 카운터도 초기화된다
+    active, streak = _should_fps_fallback(
+        config.FPS_FALLBACK_THRESHOLD + 1, False, False, False, active, streak
+    )
+    assert (active, streak) == (False, 0)
+
+
+def test_hysteresis_band_holds_fallback() -> None:
+    """임계값과 해제선 사이 FPS로는 fallback이 풀리지 않는다."""
+    assert config.FPS_FALLBACK_RECOVERY > config.FPS_FALLBACK_THRESHOLD, (
+        "이 테스트의 전제가 깨졌다 — 해제선이 임계값 이하면 히스테리시스가 없다"
+    )
+    active, streak = _feed_fps(
+        config.FPS_FALLBACK_THRESHOLD - 1, config.FPS_FALLBACK_DEBOUNCE_FRAMES
+    )
+    assert active is True
+
+    # 임계값은 넘었지만 해제선에는 못 미치는 FPS → 여전히 fallback
+    marginal = (config.FPS_FALLBACK_THRESHOLD + config.FPS_FALLBACK_RECOVERY) / 2
+    active, streak = _feed_fps(
+        marginal,
+        config.FPS_FALLBACK_DEBOUNCE_FRAMES * 2,
+        active=active,
+        streak=streak,
+    )
+    assert active is True
+
+
+def test_recovery_above_hysteresis() -> None:
+    """해제선을 넘는 FPS가 연속되면 fallback이 풀린다."""
+    active, streak = _feed_fps(
+        config.FPS_FALLBACK_THRESHOLD - 1, config.FPS_FALLBACK_DEBOUNCE_FRAMES
+    )
+    assert active is True
+
+    active, streak = _feed_fps(
+        config.FPS_FALLBACK_RECOVERY + 1,
+        config.FPS_FALLBACK_DEBOUNCE_FRAMES,
+        active=active,
+        streak=streak,
+    )
+    assert active is False
 
 
 def test_fallback_triggers_tof_only_high_risk() -> None:

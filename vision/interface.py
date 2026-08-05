@@ -44,6 +44,16 @@ class BaseCameraHAL(ABC):
         """
         return True
 
+    @property
+    def exposure_gain(self) -> tuple[int, int] | None:
+        """현재 센서 (exposure, analogue_gain). 노출 제어가 없는 구현체는 None.
+
+        CSV 진단 컬럼의 원천이다. 노출이 모션블러 상한(`CSI_AE_EXPOSURE_MAX`)에
+        붙어 있었는지를 사후에 알 수 있어야 블러의 원인이 노출 시간인지 보행 중
+        움직임인지 가릴 수 있다.
+        """
+        return None
+
 
 @dataclass
 class DetectionResult:
@@ -104,6 +114,15 @@ class VisionInterface(ABC):
         저전력 모드 진입을 미룬다.
         """
         return True
+
+    @property
+    def exposure_gain(self) -> tuple[int, int] | None:
+        """카메라의 현재 (exposure, analogue_gain). 노출 제어가 없으면 None.
+
+        AE를 가진 카메라를 소유한 구현체만 재정의한다. 호출자는 이 값을 CSV에
+        기록해 노출 상한 튜닝의 근거로 쓴다.
+        """
+        return None
 
     @abstractmethod
     def stop(self) -> None:

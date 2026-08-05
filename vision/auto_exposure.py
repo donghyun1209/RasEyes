@@ -58,6 +58,16 @@ class AutoExposure:
         """마지막으로 측광한 평균 휘도 (0~255). 측광 전에는 0.0."""
         return self._mean_luma
 
+    @property
+    def exposure_gain(self) -> Tuple[int, int]:
+        """현재 센서에 적용되어 있다고 보는 (exposure, analogue_gain).
+
+        CSV에 기록해 `CSI_AE_EXPOSURE_MAX`(모션블러 상한 노브)를 실측으로 튜닝하는
+        근거로 쓴다. 2026-08-04 세션에서는 이 값이 없어 블러의 원인이 노출 시간인지
+        보행 중 움직임인지 사후에 가릴 수 없었다.
+        """
+        return self._exposure, self._gain
+
     def update(self, now: float, frame: np.ndarray) -> Optional[Tuple[int, int]]:
         """프레임을 측광해 새 (exposure, analogue_gain)을 계산한다.
 

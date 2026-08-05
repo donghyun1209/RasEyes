@@ -26,6 +26,7 @@ class CsvLogger:
         "latency_ms", "tts_spoken", "occlusion_alerts",
         "alerts_emitted", "tof_raw_cm", "tof_only_ratio",
         "frame_luma", "no_detect_ratio", "mid_suppressed",
+        "exposure", "gain",
     ]
 
     def __init__(self, path: Optional[str] = None) -> None:
@@ -91,6 +92,8 @@ class CsvLogger:
         frame_luma: Optional[float] = None,
         no_detect_ratio: float = 0.0,
         mid_suppressed: int = 0,
+        exposure: Optional[int] = None,
+        gain: Optional[int] = None,
     ) -> None:
         """현재 운영 데이터를 한 행으로 기록한다.
 
@@ -112,6 +115,11 @@ class CsvLogger:
                 tof_only_ratio가 실명 전용이 되면서 빠진 "탐지 밀도"를 대신 담는다.
             mid_suppressed: 비전이 정상인데 탐지가 없어 MID 경보를 억제한 횟수 (증가분).
                 억제로 놓친 장애물이 있었는지 사후 검증할 유일한 수단이다.
+            exposure: 현재 센서 노출값 (v4l2 `exposure`). 노출 제어가 없으면 None.
+                `CSI_AE_EXPOSURE_MAX`(모션블러 상한)에 붙어 있었는지를 사후에 알아야
+                블러의 원인이 노출 시간인지 보행 중 움직임인지 가릴 수 있다.
+            gain: 현재 센서 아날로그 게인 (v4l2 `analogue_gain`). 없으면 None.
+                노출 상한을 낮춘 대가로 게인(노이즈)이 얼마나 올라갔는지 본다.
 
         Raises:
             RuntimeError: open() 미호출 시.
@@ -134,6 +142,8 @@ class CsvLogger:
                 "frame_luma": "" if frame_luma is None else round(frame_luma, 1),
                 "no_detect_ratio": round(no_detect_ratio, 3),
                 "mid_suppressed": mid_suppressed,
+                "exposure": "" if exposure is None else exposure,
+                "gain": "" if gain is None else gain,
             }
         )
         self._unflushed_rows += 1

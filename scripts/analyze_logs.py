@@ -160,6 +160,11 @@ def summarize(session: Session) -> Dict[str, float]:
     ]
     mid_suppressed = sum(int(_parse_float(r.get("mid_suppressed", ""))) for r in rows)
 
+    # 노출/게인은 2026-08-04 이후 세션에만 존재한다 (같은 결측 규칙이 적용된다).
+    # 노출이 상한에 붙어 있던 비율이 모션블러 진단의 핵심 지표다.
+    exposures = [_parse_float(r.get("exposure", "")) for r in rows if r.get("exposure")]
+    gains = [_parse_float(r.get("gain", "")) for r in rows if r.get("gain")]
+
     minutes = session.duration_sec / 60.0
     return {
         "rows": float(len(rows)),
@@ -210,6 +215,17 @@ def summarize(session: Session) -> Dict[str, float]:
         "mid_suppressed": float(mid_suppressed),
         "mid_suppressed_per_min": mid_suppressed / minutes if minutes > 0 else 0.0,
         "has_exposure_diag": 1.0 if lumas else 0.0,
+        "exposure_mean": statistics.fmean(exposures) if exposures else 0.0,
+        "exposure_rail_ratio": (
+            sum(1 for v in exposures if v >= config.CSI_AE_EXPOSURE_MAX) / len(exposures)
+            if exposures else 0.0
+        ),
+        "gain_mean": statistics.fmean(gains) if gains else 0.0,
+        "gain_rail_ratio": (
+            sum(1 for v in gains if v >= config.CSI_AE_GAIN_MAX) / len(gains)
+            if gains else 0.0
+        ),
+        "has_ae_ctrl_diag": 1.0 if exposures else 0.0,
     }
 
 
@@ -258,6 +274,18 @@ def print_report(session: Session, stats: Dict[str, float]) -> None:
             stats["mid_suppressed"], stats["mid_suppressed_per_min"]))
     else:
         print("  프레임 밝기: (미측정 — 노출 제어 도입 이전 세션)")
+    if stats["has_ae_ctrl_diag"]:
+        # 노출이 상한에 오래 붙어 있었다면 모션블러를 의심하고 CSI_AE_EXPOSURE_MAX를
+        # 더 낮춘다. 게인까지 동시에 상한이면 광량 자체가 부족한 것이라 상한을 낮춰도
+        # 밝기만 잃는다 — 두 비율을 함께 봐야 방향을 정할 수 있다.
+        rail_flag = " ⚠ 모션블러 의심" if stats["exposure_rail_ratio"] > 0.3 else ""
+        print("  노출      : 평균 {:.0f} | 상한({}) 도달 {:.1%}{}".format(
+            stats["exposure_mean"], config.CSI_AE_EXPOSURE_MAX,
+            stats["exposure_rail_ratio"], rail_flag))
+        print("  게인      : 평균 {:.0f} | 상한({}) 도달 {:.1%} (높을수록 노이즈)".format(
+            stats["gain_mean"], config.CSI_AE_GAIN_MAX, stats["gain_rail_ratio"]))
+    else:
+        print("  노출/게인 : (미측정 — 2026-08-04 이전 세션)")
     print("  가림 경고 : {:.0f}회".format(stats["occlusions"]))
 
 

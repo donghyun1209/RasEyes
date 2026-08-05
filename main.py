@@ -193,30 +193,64 @@ def _build_tts_text(result: FusionResult) -> Optional[str]:
 
 
 def _should_fps_fallback(
-    effective_fps: float, low_power: bool, thermal_throttle: bool
-) -> bool:
+    effective_fps: float,
+    low_power: bool,
+    thermal_throttle: bool,
+    tts_active: bool,
+    active: bool,
+    streak: int,
+) -> Tuple[bool, int]:
     """FPS 미달을 '고장'으로 보고 ToF 단독 모드로 전환할지 판단한다.
 
-    저전력(DYNAMIC_FPS_LOW_POWER_FPS=4)과 발열 스로틀링(THERMAL_THROTTLE_FPS=5)은
-    **의도적으로** FPS를 낮춘 상태이고 둘 다 FPS_FALLBACK_THRESHOLD(8)보다 낮다.
-    이를 고장으로 취급하면 절전 모드에 드는 순간 비전이 꺼져 모드가 스스로를
-    무력화한다 — 2026-07-28 Pi 실측에서 저전력 진입 0.7초 뒤 ToF 단독 전환이
-    기록됐다. Fallback은 카메라 멈춤·과부하 같은 **예기치 못한** FPS 붕괴만 잡는다.
+    저전력(DYNAMIC_FPS_LOW_POWER_FPS=4), 발열 스로틀링(THERMAL_THROTTLE_FPS=5),
+    TTS 발화 중 페이싱(TTS_ACTIVE_VISION_FPS=8)은 **의도적으로** FPS를 낮춘
+    상태이고 모두 FPS_FALLBACK_THRESHOLD(8) 이하다. 이를 고장으로 취급하면
+    FPS를 낮추는 순간 비전이 꺼져 모드가 스스로를 무력화한다 — 2026-07-28 Pi
+    실측에서 저전력 진입 0.7초 뒤 ToF 단독 전환이 기록됐다. Fallback은 카메라
+    멈춤·과부하 같은 **예기치 못한** FPS 붕괴만 잡는다.
+
+    ⚠️ **TTS는 특히 위험하다.** 발화는 경보를 말하는 순간, 즉 장애물이 잡힌
+    바로 그때 일어난다. 제외하지 않으면 경보마다 비전이 실명 처리된다 —
+    2026-08-05 실측에서 발화 0.85~1.1초 뒤 fallback 진입이 매번 재현됐고
+    (11:27:03.5 발화 → 11:27:04.3 진입) 분당 9회 진입/해제가 기록됐다.
+    TTS 목표치는 임계값보다 낮은 게 아니라 **정확히 같아서**(둘 다 8) EMA 실측이
+    경계를 오르내린 것이라 발견이 늦었다.
 
     저전력 4FPS는 250ms 간격으로 DATA_STALENESS_THRESHOLD_SEC(0.5초) 안이라
     탐지 결과는 그대로 유효하다.
+
+    판정이 깜빡이면 곤란해 `_update_luma_blind`와 같은 두 겹을 건다:
+
+    - **히스테리시스**: 일단 fallback에 걸리면 FPS_FALLBACK_RECOVERY를 넘어야 풀린다.
+    - **디바운스**: 상태를 뒤집으려면 연속 N 사이클 같은 판정이 나와야 한다.
 
     Args:
         effective_fps: 루프 FPS와 비전 FPS 중 작은 값.
         low_power: 저전력 모드 활성 여부.
         thermal_throttle: 발열 스로틀링 활성 여부.
+        tts_active: TTS 발화(합성/재생) 중 여부.
+        active: 현재 fallback 상태.
+        streak: 현재 상태와 반대되는 관측이 연속으로 나온 횟수.
 
     Returns:
-        ToF 단독 모드로 전환해야 하면 True.
+        (갱신된 fallback 상태, 갱신된 연속 카운터).
     """
-    if low_power or thermal_throttle:
-        return False
-    return effective_fps < config.FPS_FALLBACK_THRESHOLD
+    if low_power or thermal_throttle or tts_active:
+        # 의도적 저FPS는 "관측"이 아니라 "판단하지 않는 구간"이다. 디바운스를
+        # 태우지 않고 즉시 해제해, 저FPS 구간 진입이 곧바로 반영되게 한다.
+        return False, 0
+
+    threshold = (
+        config.FPS_FALLBACK_RECOVERY if active else config.FPS_FALLBACK_THRESHOLD
+    )
+    observed = effective_fps < threshold
+
+    if observed == active:
+        return active, 0
+    streak += 1
+    if streak >= config.FPS_FALLBACK_DEBOUNCE_FRAMES:
+        return observed, 0
+    return active, streak
 
 
 def _update_luma_blind(
@@ -559,6 +593,7 @@ class RasEyesApp:
         prev_loop_start: float = time.monotonic()
         prev_vision_ts: Optional[float] = None
         fps_fallback_active: bool = False
+        _fps_fallback_streak: int = 0
 
         last_log_time = time.monotonic()
         frame_interval = 1.0 / config.TARGET_FPS
@@ -717,25 +752,33 @@ class RasEyesApp:
             effective_fps = min(actual_fps, vision_fps)
             low_power = self._low_power_event.is_set()
             thermal_throttle = self._thermal_event.is_set()
-            intentional_low_fps = low_power or thermal_throttle
-            if _should_fps_fallback(effective_fps, low_power, thermal_throttle):
-                if not fps_fallback_active:
-                    logger.warning(
-                        "FPS 기준 미달 (루프 %.1f FPS, 비전 %.1f FPS < %d), ToF 단독 모드 전환",
-                        actual_fps,
-                        vision_fps,
-                        config.FPS_FALLBACK_THRESHOLD,
-                    )
-                    fps_fallback_active = True
-                last_detections = []
-            elif fps_fallback_active:
+            tts_active = self._tts_active_event.is_set()
+            intentional_low_fps = low_power or thermal_throttle or tts_active
+            prev_fallback = fps_fallback_active
+            fps_fallback_active, _fps_fallback_streak = _should_fps_fallback(
+                effective_fps,
+                low_power,
+                thermal_throttle,
+                tts_active,
+                fps_fallback_active,
+                _fps_fallback_streak,
+            )
+            if fps_fallback_active and not prev_fallback:
+                logger.warning(
+                    "FPS 기준 미달 (루프 %.1f FPS, 비전 %.1f FPS < %d), ToF 단독 모드 전환",
+                    actual_fps,
+                    vision_fps,
+                    config.FPS_FALLBACK_THRESHOLD,
+                )
+            elif prev_fallback and not fps_fallback_active:
                 logger.info(
                     "FPS fallback 해제 (루프 %.1f FPS, 비전 %.1f FPS%s)",
                     actual_fps,
                     vision_fps,
                     ", 의도적 저FPS 구간" if intentional_low_fps else " — 정상 복귀",
                 )
-                fps_fallback_active = False
+            if fps_fallback_active:
+                last_detections = []
 
             # 5-2: 비전을 신뢰할 수 없는 상태를 하나로 합성한다.
             # 밝기가 밴드를 벗어난 경우(암흑·화이트아웃)뿐 아니라 FPS fallback과
@@ -872,6 +915,7 @@ class RasEyesApp:
                         self._thermal_event.clear()
                         thermal_throttle_active = False
 
+                _exposure_gain = self._vision.exposure_gain
                 try:
                     self._csv_logger.write_row(
                         tof_distance_cm=result.distance_cm,
@@ -891,6 +935,8 @@ class RasEyesApp:
                             _no_detect_cycles / _total_cycles if _total_cycles else 0.0
                         ),
                         mid_suppressed=_mid_suppressed,
+                        exposure=None if _exposure_gain is None else _exposure_gain[0],
+                        gain=None if _exposure_gain is None else _exposure_gain[1],
                     )
                 except Exception as exc:
                     logger.error("CSV 로그 기록 실패: %s", exc)

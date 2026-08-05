@@ -40,7 +40,13 @@ AUDIO_MID_RISK_INTERVAL_MS: int = 500
 
 # Performance Monitoring
 DATA_STALENESS_THRESHOLD_SEC: float = 0.5
-FPS_FALLBACK_THRESHOLD: int = 8
+FPS_FALLBACK_THRESHOLD: int = 8            # 미만이 연속되면 fallback 진입
+# 해제선을 임계값보다 높게 잡아 경계 진동을 흡수한다. 다만 이 기기의 비전 FPS는
+# 평상시 8 근처라(2026-08-04 야외 fallback 비율 34.5%), 해제선을 10 이상으로
+# 올리면 한 번 걸린 fallback이 영영 안 풀려 진동보다 나쁜 상태가 된다.
+# 관측된 비TTS 구간 최고치가 8.8~9.4라 9.0이 도달 가능한 상한이다.
+FPS_FALLBACK_RECOVERY: float = 9.0         # 초과해야 해제 (히스테리시스)
+FPS_FALLBACK_DEBOUNCE_FRAMES: int = 5      # 상태를 뒤집으려면 연속 N 사이클 필요
 
 # Vision Model
 YOLO_MODEL_PATH: str = "yolov8n.pt"
@@ -94,6 +100,26 @@ TOF_POLL_INTERVAL_SEC: float = 0.20            # 폴링 루프 대기 시간 (TO
 TOF_RANGING_MODE_SHORT: int = 1                # SHORT: 주변광 내성 최상, 최대 거리는 짧음 (실측 필요)
 TOF_RANGING_MODE_MEDIUM: int = 2               # VL53L1X 레인징 모드 (2 = MEDIUM, 최대 3m, 200ms+ 타이밍 버짓 필요)
 TOF_STALE_TIMEOUT_SEC: float = 1.0             # 이 시간 이상 값 갱신 없으면 센서 무응답으로 간주
+TOF_MIN_VALID_CM: float = 4.0                  # VL53L1X 물리적 최소 측정 거리. 미만이면 무효 측정으로
+                                               # 간주해 OoR 치환 (직사광 포화 시 0.1~1cm 쓰레기값이
+                                               # 이동평균을 오염시켜 오경보 유발, 2026-08-04 실측)
+# ToF 시야(ROI) 제한 — SPAD 16x16 격자 중 일부만 써서 지면 반사를 시야에서 배제한다.
+# 근거: 2026-08-04 야외 86분 로그에서 유효 측정 2216개 중 2031개(92%)가 100~124cm
+# 한 구간에 몰렸고 150cm 초과는 전체 샘플의 1.6%뿐이었다. FoV 27° 콘이라 가슴 높이에서
+# 조금만 아래로 기울어도 지면이 걸린다 (docs/2.0_ROADMAP.md 5-4 마운트 각도 의심).
+#
+# ⚠️ **방향을 실측으로 확인하기 전에는 켜지 말 것.** SPAD 격자의 Y축이 실제 장면의
+# 위/아래 중 어디에 대응하는지는 센서 광학 방향과 모듈 장착 방향에 달려 있어 코드로
+# 판별할 수 없다 (카메라부터가 상하 반전 장착이라 CSI_ROTATE_180=True). 반대쪽을
+# 자르면 머리 높이 장애물을 못 보게 되어 제품 전제 자체가 무너진다.
+# 확인 절차: 서비스 정지 후 `python3 scripts/tof_roi_probe.py` (Pi에서, 착용 각도로).
+#
+# 좌표는 0~15, 최소 ROI는 4x4다. 기본값은 "상반부 절반(16x8)"에 해당하는 후보값이다.
+TOF_ROI_ENABLED: bool = False                  # 프로브로 방향 확정 후 True
+TOF_ROI_TOP_LEFT_X: int = 0
+TOF_ROI_TOP_LEFT_Y: int = 15
+TOF_ROI_BOT_RIGHT_X: int = 15
+TOF_ROI_BOT_RIGHT_Y: int = 8
 RKNN_MODEL_PATH: str = "yolov8n.rknn"          # NPU 추론 모델 경로
 RKNN_CORE_MASK: str = "NPU_CORE_0_1"           # RKNNLite NPU 코어 마스크 속성명
 GPIO_BUTTON_PIN: int = 26                      # 물리 버튼 GPIO 핀 번호
@@ -197,12 +223,38 @@ CSI_AE_CLIP_STEP: float = 0.4                  # 한도 초과 시 고정 감광
 CSI_AE_URGENT_LUMA_ERROR: float = 50.0
 CSI_AE_EXPOSURE_MIN: int = 4                   # 하드웨어 범위 (v4l2 exposure: 4 ~ 3210)
 # 노출은 길수록 저노이즈지만 모션블러가 늘어난다. 보행 웨어러블이라 블러가 불리하므로
-# 이 값을 낮추면 어두운 곳에서 게인(노이즈)으로 대신 채운다. 야외 실측 후 튜닝한다.
-CSI_AE_EXPOSURE_MAX: int = 3210
+# 이 값을 낮추면 어두운 곳에서 게인(노이즈)으로 대신 채운다.
+# 2026-08-04 야외 실측에서 하드웨어 상한(3210)까지 열려 있던 결과, 프레임 휘도는
+# 정상(luma 104~127)인데 선명도 하위 프레임은 화이트밸런스를 보정해도 탐지가 0건이었다
+# (상위 3장 4건 vs 하위 3장 0건). 상한을 절반으로 내려 블러를 걷어내고 부족분은
+# 게인으로 채운다. 노출/게인은 CSV에 기록되므로 다음 세션에서 재튜닝한다.
+CSI_AE_EXPOSURE_MAX: int = 1600
 CSI_AE_GAIN_MIN: int = 128                     # 하드웨어 범위 (v4l2 analogue_gain: 128 ~ 1984)
 CSI_AE_GAIN_MAX: int = 1984
 CSI_AE_METER_WIDTH: int = 160                  # 측광용 다운샘플링 너비 (원본 640의 1/4)
 CSI_AE_METER_HEIGHT: int = 120                 # 측광용 다운샘플링 높이 (원본 480의 1/4)
+
+# === v2.0 Phase 5-4 — Auto White Balance (AWB) ===
+# 드라이버에 red_balance/blue_balance 컨트롤이 없어(2026-07-29 Pi 실측) 소프트웨어로
+# 보정한다. 2026-08-04 야외 클립에서 **회색이어야 할 보도블록 패치**의 채널비가
+# R/G=0.56~0.65, B/G=0.65~0.84로 측정됐다 — 장면의 자연 초록이 아니라 채널 게인
+# 미보정이다. 이미지 구조(건물·차량 윤곽)는 정상이라 디모자이크 문제도 아니다.
+# 같은 클립에 그레이월드를 걸고 PC에서 YOLO를 돌리면 탐지가 2건 → 5건으로 늘었다.
+CSI_AWB_ENABLED: bool = True                   # False면 무보정 (원인 격리용)
+CSI_AWB_UPDATE_INTERVAL_SEC: float = 0.50      # 게인 재계산 주기. 적용(LUT)은 매 프레임
+# 게인을 측정값으로 즉시 갈아끼우면 장면이 바뀔 때마다 색이 출렁인다. EMA로 섞는다.
+CSI_AWB_SMOOTHING: float = 0.25                # 신규 측정값 반영 비율 (0~1, 낮을수록 느리고 안정)
+# 그레이월드는 "장면 평균은 무채색"을 가정하므로 잔디밭처럼 한 색이 지배하면 과보정한다.
+# 클램프가 그 상한선이다. 실측 보정폭(R 약 1.8배)에 여유를 둔 값.
+CSI_AWB_GAIN_MIN: float = 0.5
+CSI_AWB_GAIN_MAX: float = 3.0
+# 통계에서 제외할 밝기 대역. 클리핑된 픽셀은 세 채널이 모두 255라 게인 추정을 망치고,
+# 암부는 노이즈가 지배해 색 정보가 없다.
+CSI_AWB_DARK_THRESH: int = 16
+CSI_AWB_BRIGHT_THRESH: int = 240
+CSI_AWB_MIN_VALID_RATIO: float = 0.10          # 유효 픽셀이 이보다 적으면 게인을 갱신하지 않는다
+CSI_AWB_METER_WIDTH: int = 160                 # 측광용 다운샘플링 너비
+CSI_AWB_METER_HEIGHT: int = 120                # 측광용 다운샘플링 높이
 
 # === v2.0 Phase 5-2 — 비전 신뢰 불가(vision_blind) 판정 ===
 # "탐지 0개"와 "카메라 실명"을 구분한다. 예전에는 max_conf < MIN_CONFIDENCE 하나로

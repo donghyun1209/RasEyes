@@ -210,3 +210,64 @@ class TestClosedLoop:
         assert ae.mean_luma < config.CSI_AE_TARGET_LUMA
         # 레일에서는 저전력 진입을 막지 않는다 (영원히 수렴 못 하므로)
         assert ae.settled is True
+
+
+class TestExposureReporting:
+    """노출/게인 CSV 로깅 경로 (2026-08-04 추가).
+
+    블러의 원인이 노출 시간인지 보행 중 움직임인지 사후에 가르려면 세션 로그에
+    실제 노출값이 남아 있어야 한다.
+    """
+
+    def test_시드값을_그대로_보고한다(self) -> None:
+        """측광 전에는 생성자에 넣은 시드가 현재값이다."""
+        ae = AutoExposure(exposure=1234, gain=567)
+
+        assert ae.exposure_gain == (1234, 567)
+
+    def test_적용한_값을_보고한다(self) -> None:
+        """센서에 쓴 값과 보고값이 어긋나면 로그로 튜닝할 수 없다."""
+        ae = AutoExposure()
+        applied: Optional[Tuple[int, int]] = None
+        now = 0.0
+        for _ in range(20):
+            now += STEP_SEC
+            result = ae.update(now, _uniform(20))
+            if result is not None:
+                applied = result
+
+        assert applied is not None, "어두운 프레임인데 노출이 한 번도 갱신되지 않았습니다"
+        assert ae.exposure_gain == applied
+
+    def test_노출은_모션블러_상한을_넘지_않는다(self) -> None:
+        """CSI_AE_EXPOSURE_MAX는 하드웨어 상한이 아니라 블러 상한이다."""
+        ae = AutoExposure()
+        now = 0.0
+        for _ in range(40):
+            now += STEP_SEC
+            ae.update(now, _uniform(1))
+
+        assert ae.exposure_gain[0] <= config.CSI_AE_EXPOSURE_MAX
+
+
+class TestCameraHalReporting:
+    """CSICameraHAL이 AE 상태를 상위 계층으로 올리는 경로."""
+
+    def test_AE_비활성이면_노출을_보고하지_않는다(self, monkeypatch) -> None:
+        """노출 제어가 없는 구성에서는 0이 아니라 None(결측)이어야 한다.
+
+        0으로 기록하면 analyze_logs가 "노출 0"으로 집계해 날짜 간 비교가 망가진다.
+        """
+        from vision.csi_camera_hal import CSICameraHAL
+
+        monkeypatch.setattr(config, "CSI_AE_ENABLED", False)
+        assert CSICameraHAL().exposure_gain is None
+
+    def test_AE_활성이면_현재_노출을_전달한다(self, monkeypatch) -> None:
+        from vision.csi_camera_hal import CSICameraHAL
+
+        monkeypatch.setattr(config, "CSI_AE_ENABLED", True)
+        assert CSICameraHAL().exposure_gain == (
+            config.CSI_SENSOR_EXPOSURE,
+            config.CSI_SENSOR_GAIN,
+        )

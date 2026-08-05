@@ -8,6 +8,7 @@ import numpy as np
 
 import config
 from vision.auto_exposure import AutoExposure
+from vision.auto_white_balance import AutoWhiteBalance
 from vision.interface import BaseCameraHAL
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,7 @@ class CSICameraHAL(BaseCameraHAL):
         self._cap: cv2.VideoCapture | None = None
         self._needs_resize: bool = False
         self._ae = AutoExposure() if config.CSI_AE_ENABLED else None
+        self._awb = AutoWhiteBalance() if config.CSI_AWB_ENABLED else None
 
     @property
     def ae_settled(self) -> bool:
@@ -52,6 +54,11 @@ class CSICameraHAL(BaseCameraHAL):
         저전력 모드 진입을 미루는 판단에 쓴다.
         """
         return self._ae is None or self._ae.settled
+
+    @property
+    def exposure_gain(self) -> tuple[int, int] | None:
+        """현재 센서 (exposure, analogue_gain). AE 비활성이면 None."""
+        return None if self._ae is None else self._ae.exposure_gain
 
     def _set_exposure_gain(self, exposure: int, gain: int, timeout: float) -> None:
         """센서 subdev에 노출과 아날로그 게인을 한 번에 쓴다.
@@ -149,6 +156,10 @@ class CSICameraHAL(BaseCameraHAL):
         AE가 활성이면 이 프레임을 측광해 필요할 때만 센서 노출을 갱신한다. 데드밴드
         안에서는 v4l2 호출이 아예 발생하지 않아 정상 상태 비용은 측광(~0.3ms)뿐이다.
 
+        AWB는 AE **다음에** 적용한다. AE는 센서 노출을 되먹이는 폐루프이므로 센서가
+        실제로 낸 값(보정 전)을 측광해야 하고, 추론과 이벤트 클립은 색이 교정된
+        프레임을 봐야 하기 때문이다.
+
         Returns:
             shape (H, W, 3) BGR ndarray.
 
@@ -166,10 +177,13 @@ class CSICameraHAL(BaseCameraHAL):
             )
         if self._rotate_180:
             frame = cv2.rotate(frame, cv2.ROTATE_180)
+        now = time.monotonic()
         if self._ae is not None:
-            new_ctrl = self._ae.update(time.monotonic(), frame)
+            new_ctrl = self._ae.update(now, frame)
             if new_ctrl is not None:
                 self._set_exposure_gain(*new_ctrl, timeout=config.CSI_AE_CTRL_TIMEOUT_SEC)
+        if self._awb is not None:
+            frame = self._awb.update(now, frame)
         return frame
 
     def stop(self) -> None:

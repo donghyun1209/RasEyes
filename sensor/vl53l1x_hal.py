@@ -19,6 +19,8 @@ class VL53L1XHAL(BaseToFHAL):
     Ranging mode: MEDIUM(2) — 최대 3m, 최소 33ms 타이밍 버짓.
     (LONG(3)은 최소 140ms 필요; 50ms 설정 시 측정 주기가 1s 이상으로 늘어 데이터 만료 발생)
 
+    `config.TOF_ROI_ENABLED`이면 SPAD 격자 일부만 쓰도록 시야를 제한한다(_apply_roi).
+
     Args:
         i2c_port: I2C 버스 번호 (Orange Pi 5 기본값: 5).
         timing_budget_us: 측정 타이밍 버짓 (마이크로초).
@@ -60,7 +62,7 @@ class VL53L1XHAL(BaseToFHAL):
 
         # aarch64 ctypes 버그 수정 — initialise/startRanging/getDistance 등의
         # argtypes·restype이 32비트 기준으로 설정되어 64비트에서 segfault 발생
-        from ctypes import c_int, c_uint, c_uint16, c_void_p
+        from ctypes import c_int, c_uint, c_uint8, c_uint16, c_void_p
 
         lib = VL53L1X._TOF_LIBRARY  # _TOF_LIBRARY is a module-level variable, not a class attr
         lib.initialise.restype = c_void_p
@@ -70,6 +72,7 @@ class VL53L1XHAL(BaseToFHAL):
         lib.getDistance.restype = c_uint16
         lib.setMeasurementTimingBudgetMicroSeconds.argtypes = [c_void_p, c_uint]
         lib.setInterMeasurementPeriodMilliSeconds.argtypes = [c_void_p, c_uint]
+        lib.setUserRoi.argtypes = [c_void_p, c_uint8, c_uint8, c_uint8, c_uint8]
 
         try:
             self._tof = VL53L1X.VL53L1X(i2c_bus=self._i2c_port)
@@ -77,6 +80,8 @@ class VL53L1XHAL(BaseToFHAL):
             self._tof.set_timing(
                 self._timing_budget_us, self._inter_measurement_ms
             )
+            if config.TOF_ROI_ENABLED:
+                self._apply_roi(VL53L1X)
             self._tof.start_ranging(config.TOF_RANGING_MODE_MEDIUM)
         except Exception as exc:
             if self._tof is not None:
@@ -98,6 +103,38 @@ class VL53L1XHAL(BaseToFHAL):
             self._timing_budget_us,
             self._inter_measurement_ms,
         )
+
+    def _apply_roi(self, vl53l1x_module) -> None:
+        """SPAD 격자의 일부만 쓰도록 시야(ROI)를 제한한다.
+
+        가슴 높이 착용 시 27° FoV의 아래쪽 끄트머리에 지면이 걸려, 2026-08-04 야외
+        로그에서 유효 측정의 92%가 100~124cm 한 구간에 몰렸다. 격자의 절반만 쓰면
+        물리 가림막 없이 그 방향을 잘라낼 수 있다.
+
+        실패해도 예외를 올리지 않는다 — 시야가 넓은 것보다 센서가 아예 없는 쪽이
+        훨씬 나쁘다. 경고만 남기고 전체 FoV로 계속 진행한다.
+
+        Args:
+            vl53l1x_module: start()에서 지연 임포트한 VL53L1X 모듈.
+        """
+        try:
+            # 클래스명은 소문자 x다 (VL53L1XUserRoi는 존재하지 않는다)
+            roi = vl53l1x_module.VL53L1xUserRoi(
+                config.TOF_ROI_TOP_LEFT_X,
+                config.TOF_ROI_TOP_LEFT_Y,
+                config.TOF_ROI_BOT_RIGHT_X,
+                config.TOF_ROI_BOT_RIGHT_Y,
+            )
+            self._tof.set_user_roi(roi)
+            logger.info(
+                "ToF ROI 적용: (%d,%d)-(%d,%d)",
+                config.TOF_ROI_TOP_LEFT_X,
+                config.TOF_ROI_TOP_LEFT_Y,
+                config.TOF_ROI_BOT_RIGHT_X,
+                config.TOF_ROI_BOT_RIGHT_Y,
+            )
+        except Exception as exc:
+            logger.warning("ToF ROI 적용 실패, 전체 FoV로 계속: %s", exc)
 
     def _poll_loop(self) -> None:
         """단일 상주 스레드에서 센서 값을 지속적으로 읽어 최신값을 갱신한다.
@@ -141,7 +178,9 @@ class VL53L1XHAL(BaseToFHAL):
         블로킹이 없다. 값이 1초 이상 갱신되지 않으면 센서 무응답으로 간주한다.
 
         Returns:
-            측정된 거리 (cm). 범위 초과 시 TOF_OUT_OF_RANGE_CM.
+            측정된 거리 (cm). 범위 초과 또는 무효 측정(물리적 최소 거리
+            TOF_MIN_VALID_CM 미만 — 직사광 포화 시 0.1~1cm 쓰레기값) 시
+            TOF_OUT_OF_RANGE_CM.
 
         Raises:
             RuntimeError: start() 미호출 또는 1초 이상 값 갱신이 없을 시.
@@ -156,7 +195,10 @@ class VL53L1XHAL(BaseToFHAL):
         if distance_mm is None or time.monotonic() - update_ts > config.TOF_STALE_TIMEOUT_SEC:
             raise RuntimeError("ToF 센서 1초 이상 무응답")
 
-        if distance_mm == 0:
+        # 0(측정 실패)과 물리적 최소 거리 미만의 쓰레기값(직사광 포화 시 1mm 등)은
+        # 모두 "신뢰할 측정 없음" — 이동평균에 넣으면 안전 방향이 아니라 근접
+        # 방향으로 평균을 왜곡해 오경보가 된다
+        if distance_mm < config.TOF_MIN_VALID_CM * 10:
             return config.TOF_OUT_OF_RANGE_CM
         return distance_mm / 10.0  # mm → cm
 

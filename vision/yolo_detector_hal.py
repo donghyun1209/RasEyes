@@ -62,6 +62,11 @@ class YoloDetector(VisionInterface):
         """카메라의 AE 수렴 상태를 그대로 전달한다."""
         return self._camera.ae_settled
 
+    @property
+    def exposure_gain(self) -> tuple[int, int] | None:
+        """카메라의 현재 노출/게인을 그대로 전달한다."""
+        return self._camera.exposure_gain
+
     def start(self) -> None:
         """카메라를 시작하고 YOLO 모델을 로드한다.
 

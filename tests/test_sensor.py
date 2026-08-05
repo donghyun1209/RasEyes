@@ -1,9 +1,13 @@
 """ToF 센서 이동평균 필터 및 Mock 테스트."""
+import time
+
 import pytest
 
+import config
 from fusion.engine import FusionEngine, RiskLevel
 from sensor.filters import MovingAverageFilter
 from sensor.mock import MockToFSensor
+from sensor.vl53l1x_hal import VL53L1XHAL
 from vision.interface import DetectionResult
 
 
@@ -111,6 +115,47 @@ class TestMockToFSensorSequence:
         sensor.start()
         with pytest.raises(ValueError):
             sensor.set_sequence([])
+
+
+class TestVL53L1XInvalidReadingGate:
+    """물리적 최소 거리(TOF_MIN_VALID_CM) 미만 무효 측정의 OoR 치환 검증.
+
+    2026-08-04 야외 실측에서 직사광 포화 시 VL53L1X가 0.1~1cm 쓰레기값을
+    분당 12~19회 반환했고, 이 값이 이동평균을 근접 방향으로 오염시켜
+    빈 보도에서 HIGH/MID 오경보를 유발했다. 실제 센서 라이브러리 없이
+    내부 상태를 직접 주입해 read_distance_cm()의 매핑 로직만 검증한다.
+    """
+
+    @staticmethod
+    def _hal_with_reading(distance_mm: int) -> VL53L1XHAL:
+        hal = VL53L1XHAL()
+        hal._running = True
+        hal._tof = object()  # start() 없이 read 가드만 통과시키기 위한 더미
+        hal._latest_distance_mm = distance_mm
+        hal._latest_update_ts = time.monotonic()
+        return hal
+
+    def test_garbage_1mm_maps_to_oor(self) -> None:
+        """2026-08-04 실측 쓰레기값(1mm)은 OoR로 치환된다."""
+        hal = self._hal_with_reading(1)
+        assert hal.read_distance_cm() == config.TOF_OUT_OF_RANGE_CM
+
+    def test_just_below_min_valid_maps_to_oor(self) -> None:
+        hal = self._hal_with_reading(int(config.TOF_MIN_VALID_CM * 10) - 1)
+        assert hal.read_distance_cm() == config.TOF_OUT_OF_RANGE_CM
+
+    def test_min_valid_boundary_passes_through(self) -> None:
+        hal = self._hal_with_reading(int(config.TOF_MIN_VALID_CM * 10))
+        assert hal.read_distance_cm() == config.TOF_MIN_VALID_CM
+
+    def test_zero_still_maps_to_oor(self) -> None:
+        """기존 0(측정 실패) 처리가 보존된다."""
+        hal = self._hal_with_reading(0)
+        assert hal.read_distance_cm() == config.TOF_OUT_OF_RANGE_CM
+
+    def test_normal_reading_passes_through(self) -> None:
+        hal = self._hal_with_reading(1000)
+        assert hal.read_distance_cm() == 100.0
 
 
 def test_mock_sample_seq_advances_per_read() -> None:

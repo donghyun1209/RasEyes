@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from audio.beep_controller import BeepController
+from audio.jack_hal import JackAudioHAL
 from audio.mock import MockAudio
 from audio.resident_stream import ResidentAudioStream
 from fusion.engine import RiskLevel
@@ -171,3 +172,49 @@ class TestResidentAudioStream:
         mock_backend.stop.assert_called_once()
         mock_backend.close.assert_called_once()
         assert stream._stream is None
+
+
+class TestJackAudioUnmute:
+    """ES8388 출력 스위치 강제 해제 로직.
+
+    2026-08-06 Pi 실측: 'hp switch'/'spk switch'는 DAPM 위젯이라 재생 스트림이
+    없으면 on 설정 직후 커널이 off로 되돌린다. 그 둘로 검증하면 매 기동마다
+    "믹서 음소거 해제 검증 최종 실패"를 남기면서, 정작 소리를 막고 있던
+    'Headphone'이 off인 것은 잡지 못한다.
+    """
+
+    @staticmethod
+    def _sset_targets(run_mock: MagicMock) -> set:
+        """subprocess.run 호출 기록에서 sset 대상 컨트롤 이름만 추출한다."""
+        return {
+            call.args[0][4]
+            for call in run_mock.call_args_list
+            if call.args and call.args[0][3] == "sset"
+        }
+
+    def test_unmute_sets_real_output_switches(self) -> None:
+        """실제 음소거 컨트롤(Headphone·Speaker)에 on을 쓴다."""
+        hal = JackAudioHAL()
+        with patch("audio.jack_hal.subprocess.run") as run_mock:
+            run_mock.return_value = MagicMock(stdout="Mono: Playback [on]")
+            hal._unmute_hw()
+
+        assert {"Headphone", "Speaker"} <= self._sset_targets(run_mock)
+
+    def test_verify_checks_real_output_switches_not_dapm_widgets(self) -> None:
+        """검증은 DAPM 위젯이 아니라 실제 음소거 컨트롤을 조회한다."""
+        hal = JackAudioHAL()
+        with patch("audio.jack_hal.subprocess.run") as run_mock:
+            run_mock.return_value = MagicMock(stdout="Mono: Playback [on]")
+            assert hal._verify_unmuted() is True
+
+        queried = {call.args[0][4] for call in run_mock.call_args_list}
+        assert queried == {"Headphone", "Speaker"}
+        assert "hp switch" not in queried
+
+    def test_verify_fails_when_output_switch_off(self) -> None:
+        """출력 스위치가 off면 검증이 실패한다 (이번 무음 사고의 상태)."""
+        hal = JackAudioHAL()
+        with patch("audio.jack_hal.subprocess.run") as run_mock:
+            run_mock.return_value = MagicMock(stdout="Mono: Playback [off]")
+            assert hal._verify_unmuted() is False

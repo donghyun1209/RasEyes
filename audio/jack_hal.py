@@ -12,6 +12,12 @@ from fusion.engine import RiskLevel
 
 logger = logging.getLogger(__name__)
 
+# ES8388의 실제 음소거 스위치. 'hp switch'/'spk switch'는 DAPM 위젯이라
+# 재생 스트림이 활성인 동안만 on을 유지하고 그 외에는 커널이 즉시 off로 되돌린다
+# (2026-08-06 Pi 실측: sset on 직후 sget이 [off]). 따라서 그 둘로 검증하면
+# 매 기동마다 실패하면서, 정작 소리를 막고 있는 이 컨트롤들은 놓친다.
+MIXER_OUTPUT_SWITCHES: tuple = ("Headphone", "Speaker")
+
 
 class JackAudioHAL(BaseAudioHAL):
     """sounddevice를 사용해 3.5mm 잭으로 비프음을 출력하는 HAL 구현체.
@@ -88,7 +94,7 @@ class JackAudioHAL(BaseAudioHAL):
     def start(self) -> None:
         """ALSA aplay를 통한 오디오 출력을 초기화한다.
 
-        부팅/오디오 카드 상태 변경 시 hp switch·spk switch가 음소거(off)로
+        부팅/오디오 카드 상태 변경 시 출력 스위치가 음소거(off)로
         재설정되는 경우가 있어, 기동 시마다 강제로 음소거를 해제하는
         안전장치를 적용한다.
         """
@@ -107,6 +113,10 @@ class JackAudioHAL(BaseAudioHAL):
         """
         for attempt in range(1, config.AUDIO_UNMUTE_MAX_RETRIES + 1):
             for cmd in (
+                *(
+                    ["amixer", "-c", config.ALSA_CARD_INDEX, "sset", control, "on"]
+                    for control in MIXER_OUTPUT_SWITCHES
+                ),
                 ["amixer", "-c", config.ALSA_CARD_INDEX, "sset", "hp switch", "on"],
                 ["amixer", "-c", config.ALSA_CARD_INDEX, "sset", "spk switch", "on"],
                 ["amixer", "-c", config.ALSA_CARD_INDEX, "sset", "PCM", config.ALSA_PCM_VOLUME],
@@ -129,13 +139,13 @@ class JackAudioHAL(BaseAudioHAL):
         logger.error("믹서 음소거 해제 검증 최종 실패 — 오디오 출력이 음소거 상태일 수 있습니다.")
 
     def _verify_unmuted(self) -> bool:
-        """hp switch·spk switch가 실제로 on 상태인지 amixer 조회로 확인한다.
+        """MIXER_OUTPUT_SWITCHES가 실제로 on 상태인지 amixer 조회로 확인한다.
 
         Returns:
-            두 스위치 모두 on이면 True, 조회 실패 또는 off면 False.
+            모든 스위치가 on이면 True, 조회 실패 또는 off면 False.
         """
         try:
-            for control in ("hp switch", "spk switch"):
+            for control in MIXER_OUTPUT_SWITCHES:
                 result = subprocess.run(
                     ["amixer", "-c", config.ALSA_CARD_INDEX, "sget", control],
                     capture_output=True,

@@ -16,7 +16,7 @@
 * 타입 힌트와 구글 스타일 Docstring 필수 작성. 예외 처리 철저.
 
 ## 3. Core Logic (Sensor Fusion)
-* **High Risk:** 객체 인식됨 & ToF 거리 <= 100cm & Confidence >= MIN_CONF. (즉각 경고 트리거)
+* **High Risk:** 객체 인식됨 & ToF 거리 <= 100cm & Confidence >= MIN_CONFIDENCE. (즉각 경고 트리거)
 * **Mid Risk:** 객체 인식됨 & ToF 거리 <= 150cm. (주의 경고 트리거)
 * **`탐지 0개`와 `비전 신뢰 불가`는 다른 상태다.** 예전에는 `max_conf < MIN_CONFIDENCE` 하나로 뭉뚱그렸는데, 디텍터가 이미 conf로 필터링하므로 그 식은 `len(detections)==0`과 동치였다. 그 결과 빈 장면에서도 객체 확인 게이트가 우회되어 ToF 숫자만으로 경보가 나갔다 (2026-07-29 야외 `tof_only_ratio` 96.2%). `FusionEngine.evaluate()`는 세 상태를 분리한다:
   * **`vision_blind=True`** → 거리만으로 MID/HIGH (ToF 단독 안전망 유지). `tof_only_mode=True`.
@@ -65,6 +65,10 @@
 | `python3 scripts/tof_range_bench.py --mode short --seconds 60` | VL53L1X 레인징 모드 실측 (**Pi에서 실행**). SHORT 전환 가부 판단용 — 범위 초과 시 반환값·유효 최대 거리·노이즈 측정 |
 | `python3 scripts/tof_roi_probe.py` | ToF 시야(ROI) 방향 실측 (**Pi에서 실행, 서비스 정지 + 착용 각도 필요**). 상반부/하반부 중 어느 쪽이 지면을 보는지 판정 — `TOF_ROI_ENABLED`를 켜기 전 필수 |
 | `python3 scripts/wb_probe.py --frames 30` | 카메라 채널 균형 진단 (**Pi에서 실행, 서비스 정지 필요**). AWB 도입 판단은 2026-08-04 수집 클립 분석으로 이미 끝났다(§10) — AWB 게인이 의심스러울 때 센서 원본 채널비를 직접 재는 용도로 남긴다 |
+| `python scripts/export_rknn.py` | YOLOv8n → RKNN INT8 변환 (**PC x86에서 실행**, `rknn-toolkit2` 필요). 결과물을 Pi로 scp |
+| `python scripts/bench_rknn.py` | RKNN 추론 속도 실측 (**Pi에서 실행**). KPI(평균 <60ms) 달성 여부 판정 |
+| `python scripts/test_device.py` | Orange Pi 5 HAL 단품 테스트 (**Pi에서 실행**). 카메라·ToF·오디오 순차 검증, 전체 PASS 시 exit(0) |
+| `sudo python scripts/pwm_fan_control.py` | 액티브 쿨러 PWM 온도 기반 제어 (**Pi에서 실행, main.py와 별도 프로세스**) |
 
 ## 6. Environment Variables
 * `RASEYES_MOCK=1`: 모든 컴포넌트를 Mock으로 교체 (카메라·모델 불필요). 개발 기본값.
@@ -79,6 +83,7 @@
 * **합성(synthesis) 스레드:** TTS는 신경망/subprocess 추론이 CPU를 점유하므로 여전히 백그라운드 스레드에서 수행한다. 이 스레드는 합성만 담당하고, 완료 후 `self._stream.play()`로 넘기고 곧바로 종료한다 (재생 완료를 기다리는 폴링 루프 없음).
 * **스레드 정지 플래그:** `_stop_flag.clear()` 사용 금지. 선점 시 `self._stop_flag = threading.Event()` 로 새 인스턴스 교체 (레이스 컨디션 방지).
 * **TTS 스택:** PiperTts (모델: `models/tts/ko_KR-kss-medium.onnx`) → EspeakTts → MockTts 우선순위. 모델 설치: `bash scripts/download_piper_model.sh`.
+* **고정 문구 사전 렌더링 캐시:** `audio/prerendered_tts.py` + `scripts/prerender_tts_cache.py`. 부팅 직후처럼 고정 경고 문구가 몰리는 상황에서 매번 Piper 신경망 추론을 돌리면 연산·전류 스파이크가 생기므로, 빌드 타임에 WAV로 미리 렌더링해두고 런타임엔 로드만 한다. 문구 목록(`config.TTS_PRERENDERED_PHRASES`)이나 모델이 바뀌면 재실행 필요.
 * **미설치 라이브러리 테스트:** PC에 `sounddevice`, `piper` 미설치. `ResidentAudioStream.start()`는 `sounddevice` 미설치/디바이스 오류 시 예외를 삼키고 재생을 비활성화(no-op)하므로, 재생 로직 테스트는 `patch.object(tts, "_stream")`으로 스트림 자체를 모킹하고, `ResidentAudioStream` 자체의 단위 테스트는 `patch.dict(sys.modules, {"sounddevice": MagicMock()})` 사용.
 * **외부 모델 초기화:** 모델 파일이 필요한 클래스 생성 전 반드시 `os.path.exists(path)` 선행 확인 후 fallback 처리.
 

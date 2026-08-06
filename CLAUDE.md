@@ -82,8 +82,13 @@
   * `is_speaking()` / 발화 상태 확인: `(합성 스레드 is_alive()) or self._stream.is_playing()` 형태로 판단한다 (합성과 재생을 모두 커버).
 * **합성(synthesis) 스레드:** TTS는 신경망/subprocess 추론이 CPU를 점유하므로 여전히 백그라운드 스레드에서 수행한다. 이 스레드는 합성만 담당하고, 완료 후 `self._stream.play()`로 넘기고 곧바로 종료한다 (재생 완료를 기다리는 폴링 루프 없음).
 * **스레드 정지 플래그:** `_stop_flag.clear()` 사용 금지. 선점 시 `self._stop_flag = threading.Event()` 로 새 인스턴스 교체 (레이스 컨디션 방지).
-* **TTS 스택:** PiperTts (모델: `models/tts/ko_KR-kss-medium.onnx`) → EspeakTts → MockTts 우선순위. 모델 설치: `bash scripts/download_piper_model.sh`.
+* **TTS 스택:** PiperTts → EspeakTts → MockTts 우선순위. 모델 설치: `bash scripts/download_piper_model.sh`.
+  * ⚠️ **Piper 모델이 영어(`models/tts/en_US-lessac-medium.onnx`)인 것은 의도적이다.** 한국어 `ko_KR-kss-medium`의 합성 음질이 어색해 영어 모델을 선택했다. 한국어 프로젝트에 영어 TTS라 버그로 오인하기 쉬우므로(2026-08-06에 두 번 지적됨) **되돌리지 않는다.** 설정 위치는 `config.TTS_PIPER_MODEL_PATH`.
 * **고정 문구 사전 렌더링 캐시:** `audio/prerendered_tts.py` + `scripts/prerender_tts_cache.py`. 부팅 직후처럼 고정 경고 문구가 몰리는 상황에서 매번 Piper 신경망 추론을 돌리면 연산·전류 스파이크가 생기므로, 빌드 타임에 WAV로 미리 렌더링해두고 런타임엔 로드만 한다. 문구 목록(`config.TTS_PRERENDERED_PHRASES`)이나 모델이 바뀌면 재실행 필요.
+* **믹서 음소거 해제(`JackAudioHAL._unmute_hw`)는 `Headphone`/`Speaker`를 켠다** (`audio.jack_hal.MIXER_OUTPUT_SWITCHES`). `hp switch`/`spk switch`는 **DAPM 위젯**이라 재생 스트림이 활성인 동안만 on을 유지하고, 유휴 상태에서는 커널이 즉시 off로 되돌린다 (2026-08-06 Pi 실측: `amixer sset ... on` 직후 `sget`이 `[off]`).
+  * 그래서 그 둘로 검증하면 **매 기동마다 "믹서 음소거 해제 검증 최종 실패" 에러를 남기면서, 정작 소리를 막고 있는 `Headphone`이 off인 것은 놓친다** — 실제로 부팅 안내가 통째로 무음이었는데 서비스는 정상으로 보였다. 로그의 `부팅 오디오 큐 재생`은 재생 시도만 뜻하므로 무음 진단에 쓸 수 없다.
+  * 무음이 의심되면 `ssh raseyes "amixer -c 2 sget Headphone"`으로 확인한다. ES8388은 **card 2**다 (card 0은 DisplayPort, 1은 HDMI — `amixer -c 0`은 엉뚱한 카드다).
+  * 회귀 테스트: `tests/test_audio.py::TestJackAudioUnmute`.
 * **미설치 라이브러리 테스트:** PC에 `sounddevice`, `piper` 미설치. `ResidentAudioStream.start()`는 `sounddevice` 미설치/디바이스 오류 시 예외를 삼키고 재생을 비활성화(no-op)하므로, 재생 로직 테스트는 `patch.object(tts, "_stream")`으로 스트림 자체를 모킹하고, `ResidentAudioStream` 자체의 단위 테스트는 `patch.dict(sys.modules, {"sounddevice": MagicMock()})` 사용.
 * **외부 모델 초기화:** 모델 파일이 필요한 클래스 생성 전 반드시 `os.path.exists(path)` 선행 확인 후 fallback 처리.
 

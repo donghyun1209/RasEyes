@@ -2,12 +2,39 @@
 import logging
 import threading
 import time
+from ctypes import (POINTER, Structure, byref, c_int16, c_uint8, c_uint16,
+                    c_uint32, c_void_p)
 from typing import Optional
 
 import config
 from sensor.interface import BaseToFHAL
 
 logger = logging.getLogger(__name__)
+
+
+class _RangingMeasurementData(Structure):
+    """ST `VL53L1_RangingMeasurementData_t`의 ctypes 대응 구조체 (vl53l1_def.h).
+
+    pimoroni 래퍼의 `getDistance()`는 이 구조체를 채운 뒤 거리만 반환하고
+    RangeStatus·신호 강도를 버린다. 그 정보가 있어야 "표적 없음"과 "유효 측정"을
+    구분할 수 있어서(2026-08-08 실측), 원본 API를 직접 호출해 통째로 받는다.
+
+    `FixPoint1616_t`는 uint32다. 네이티브 정렬 기준 sizeof == 28이며, Pi 실측으로
+    확인했다 — 오프셋이 틀리면 status가 조용히 쓰레기값이 되므로 구조를 바꾸지 말 것.
+    """
+
+    _fields_ = [
+        ("TimeStamp", c_uint32),
+        ("StreamCount", c_uint8),
+        ("RangeQualityLevel", c_uint8),
+        ("SignalRateRtnMegaCps", c_uint32),
+        ("AmbientRateRtnMegaCps", c_uint32),
+        ("EffectiveSpadRtnCount", c_uint16),
+        ("SigmaMilliMeter", c_uint32),
+        ("RangeMilliMeter", c_int16),
+        ("RangeFractionalPart", c_uint8),
+        ("RangeStatus", c_uint8),
+    ]
 
 
 class VL53L1XHAL(BaseToFHAL):
@@ -43,6 +70,12 @@ class VL53L1XHAL(BaseToFHAL):
         self._latest_update_ts: float = 0.0
         self._sample_seq: int = 0
         self._poll_thread: Optional[threading.Thread] = None
+        # RangeStatus 게이트 (config.TOF_STATUS_GATE_ENABLED). 조회에 실패하면
+        # 런타임에 꺼지고 거리 값만으로 계속한다.
+        self._status_gate: bool = config.TOF_STATUS_GATE_ENABLED
+        self._latest_status: Optional[int] = None
+        self._lib = None
+        self._meas = _RangingMeasurementData()
 
     def start(self) -> None:
         """센서를 초기화하고 측정을 시작한다.
@@ -62,7 +95,7 @@ class VL53L1XHAL(BaseToFHAL):
 
         # aarch64 ctypes 버그 수정 — initialise/startRanging/getDistance 등의
         # argtypes·restype이 32비트 기준으로 설정되어 64비트에서 segfault 발생
-        from ctypes import c_int, c_uint, c_uint8, c_uint16, c_void_p
+        from ctypes import c_int, c_int8, c_uint
 
         lib = VL53L1X._TOF_LIBRARY  # _TOF_LIBRARY is a module-level variable, not a class attr
         lib.initialise.restype = c_void_p
@@ -73,6 +106,20 @@ class VL53L1XHAL(BaseToFHAL):
         lib.setMeasurementTimingBudgetMicroSeconds.argtypes = [c_void_p, c_uint]
         lib.setInterMeasurementPeriodMilliSeconds.argtypes = [c_void_p, c_uint]
         lib.setUserRoi.argtypes = [c_void_p, c_uint8, c_uint8, c_uint8, c_uint8]
+        # 래퍼가 노출하지 않는 ST 원본 API — RangeStatus를 읽는 유일한 경로
+        lib.VL53L1_GetRangingMeasurementData.argtypes = [
+            c_void_p, POINTER(_RangingMeasurementData)
+        ]
+        lib.VL53L1_GetRangingMeasurementData.restype = c_int8  # VL53L1_Error
+        self._lib = lib
+
+        # ⚠️ 재초기화 경로에서 반드시 먼저 호출한다. 이게 없으면 옛 폴링 스레드가
+        # 살아 있는 채로 아래에서 self._tof가 교체되고, 그 스레드가 아직 open()
+        # 전인 객체의 _dev(=None)를 원본 API에 넘겨 NULL 역참조로 죽는다.
+        # ctypes는 argtypes가 c_void_p면 None을 NULL로 조용히 통과시키므로
+        # _read_status의 try/except로도 안 잡힌다 (2026-08-09 야외 실측:
+        # I2C 접촉 불량 → 재초기화 → SEGV로 서비스가 19회 재시작).
+        self._stop_polling()
 
         try:
             self._tof = VL53L1X.VL53L1X(i2c_bus=self._i2c_port)
@@ -103,6 +150,37 @@ class VL53L1XHAL(BaseToFHAL):
             self._timing_budget_us,
             self._inter_measurement_ms,
         )
+
+    def _stop_polling(self) -> None:
+        """폴링 스레드를 정지시키고 합류를 기다린 뒤 이전 센서 핸들을 닫는다.
+
+        `start()`가 재초기화로 다시 불릴 때 옛 스레드와 새 스레드가 같은
+        `self._tof`를 두고 경쟁하는 것을 막는다. 첫 `start()`에서는 스레드가 없어
+        아무 일도 하지 않는다.
+
+        Raises:
+            RuntimeError: 폴링 스레드가 제한 시간 안에 정지하지 않은 경우.
+                이때는 `self._tof`를 건드리지 않고 예외를 올린다 — 살아 있는
+                스레드가 보는 객체를 교체하느니 재초기화를 실패시키는 편이 낫다
+                (호출자가 재시도하고, 끝내 실패하면 ToF만 죽고 비전은 계속 돈다).
+        """
+        self._running = False
+        thread = self._poll_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=config.TOF_POLL_JOIN_TIMEOUT_SEC)
+            if thread.is_alive():
+                raise RuntimeError(
+                    "ToF 폴링 스레드가 "
+                    f"{config.TOF_POLL_JOIN_TIMEOUT_SEC}초 안에 정지하지 않았다"
+                )
+        self._poll_thread = None
+        if self._tof is not None:
+            try:
+                self._tof.stop_ranging()
+                self._tof.close()
+            except Exception as exc:
+                logger.warning("이전 ToF 핸들 정리 중 오류 (무시): %s", exc)
+            self._tof = None
 
     def _apply_roi(self, vl53l1x_module) -> None:
         """SPAD 격자의 일부만 쓰도록 시야(ROI)를 제한한다.
@@ -147,14 +225,63 @@ class VL53L1XHAL(BaseToFHAL):
         while self._running:
             try:
                 distance_mm = self._tof.get_distance()
+                status = self._read_status()
+                if status is not None:
+                    # 거리도 구조체 값으로 대체한다. get_distance()가 돌려준 값과
+                    # 구조체 값은 서로 다른 측정일 수 있어(2026-08-08 야외 실측:
+                    # 값이 튀는 구간에서 최대 91% 불일치), 둘을 섞으면 한 측정의
+                    # status가 다른 측정의 거리를 판정하게 된다.
+                    distance_mm = self._meas.RangeMilliMeter
                 with self._lock:
                     self._latest_distance_mm = distance_mm
+                    self._latest_status = status
                     self._latest_update_ts = time.monotonic()
                     self._sample_seq += 1
                 time.sleep(config.TOF_POLL_INTERVAL_SEC)
             except Exception as exc:
                 logger.warning("ToF 폴링 오류 (무시하고 계속): %s", exc)
                 time.sleep(config.TOF_POLL_INTERVAL_SEC)
+
+    def _read_status(self) -> Optional[int]:
+        """직전 측정의 RangeStatus를 읽는다 (`self._meas`도 함께 채워진다).
+
+        pimoroni 래퍼에는 이 값을 얻을 API가 없어 ST 원본 함수를 직접 호출한다.
+        핸들(`_tof._dev`)은 래퍼가 private으로 들고 있지만, 래퍼 자신도 이 핸들을
+        원본 API에 그대로 넘기고 있어(VL53L1X.py:223) 타입이 통용된다.
+
+        조회에 실패하면 게이트를 끄고 이후로는 시도하지 않는다 — 매 폴링마다
+        경고를 쌓는 것보다, 거리 값만으로 계속 도는 쪽이 낫다 (_apply_roi와 같은
+        원칙: 시야가 넓은 것보다 센서가 아예 없는 쪽이 훨씬 나쁘다).
+
+        Returns:
+            RangeStatus (0=RANGE_VALID). 게이트가 꺼져 있거나 조회 실패 시 None.
+        """
+        if not self._status_gate or self._lib is None:
+            return None
+        # NULL 역참조 방어. ctypes는 argtypes가 c_void_p면 None을 NULL로 조용히
+        # 넘기고, C 라이브러리가 그걸 역참조하면 파이썬 예외가 아니라 SEGV다 —
+        # 아래 try/except로는 절대 못 잡는다. 재초기화 경합은 _stop_polling()이
+        # 막지만, 이 호출은 실패 비용이 프로세스 종료라 한 겹 더 둔다.
+        dev = getattr(self._tof, "_dev", None)
+        if not dev:
+            return None
+        try:
+            err = self._lib.VL53L1_GetRangingMeasurementData(
+                dev, byref(self._meas)
+            )
+        except Exception as exc:  # ctypes 호출 자체가 실패한 경우
+            logger.warning("RangeStatus 조회 예외 — 게이트를 끄고 계속: %s", exc)
+            self._status_gate = False
+            return None
+        if err != 0:
+            logger.warning(
+                "RangeStatus 조회 실패(VL53L1_Error=%d) — 게이트를 끄고 "
+                "거리 값만으로 계속한다. 표적 없는 방향의 허수값을 "
+                "걸러내지 못하게 되므로 오경보가 늘 수 있다.", err
+            )
+            self._status_gate = False
+            return None
+        return self._meas.RangeStatus
 
     @property
     def sample_seq(self) -> int:
@@ -178,9 +305,9 @@ class VL53L1XHAL(BaseToFHAL):
         블로킹이 없다. 값이 1초 이상 갱신되지 않으면 센서 무응답으로 간주한다.
 
         Returns:
-            측정된 거리 (cm). 범위 초과 또는 무효 측정(물리적 최소 거리
-            TOF_MIN_VALID_CM 미만 — 직사광 포화 시 0.1~1cm 쓰레기값) 시
-            TOF_OUT_OF_RANGE_CM.
+            측정된 거리 (cm). 다음 중 하나라도 해당하면 TOF_OUT_OF_RANGE_CM:
+            RangeStatus가 무효, 범위 초과, 물리적 최소 거리 TOF_MIN_VALID_CM
+            미만(직사광 포화 시 0.1~1cm 쓰레기값).
 
         Raises:
             RuntimeError: start() 미호출 또는 1초 이상 값 갱신이 없을 시.
@@ -191,14 +318,29 @@ class VL53L1XHAL(BaseToFHAL):
         with self._lock:
             distance_mm = self._latest_distance_mm
             update_ts = self._latest_update_ts
+            status = self._latest_status
 
         if distance_mm is None or time.monotonic() - update_ts > config.TOF_STALE_TIMEOUT_SEC:
             raise RuntimeError("ToF 센서 1초 이상 무응답")
+
+        # RangeStatus가 무효면 거리값 자체가 허수다 — 크기로는 절대 못 거른다.
+        # 2026-08-08 야외 실측: 표적이 없는 트인 공간에서 508샘플 전부 무효였는데
+        # 거리는 34~321cm(중앙값 120.8cm)로 그럴듯했고, 그 대역이 경보 임계값
+        # (100/150cm) 한복판이라 빈 공간에서 경보가 계속 나갔다.
+        if status is not None and status not in config.TOF_VALID_RANGE_STATUS:
+            return config.TOF_OUT_OF_RANGE_CM
 
         # 0(측정 실패)과 물리적 최소 거리 미만의 쓰레기값(직사광 포화 시 1mm 등)은
         # 모두 "신뢰할 측정 없음" — 이동평균에 넣으면 안전 방향이 아니라 근접
         # 방향으로 평균을 왜곡해 오경보가 된다
         if distance_mm < config.TOF_MIN_VALID_CM * 10:
+            return config.TOF_OUT_OF_RANGE_CM
+        # 상한도 같은 이유로 막는다. 센서 상태가 꼬이면 getDistance()가 65535mm
+        # (uint16 최대)를 뱉는데(2026-08-08 실측), 그대로 흘리면 6553.5cm가 되어
+        # 로그의 OoR 집계(TOF_OUT_OF_RANGE_CM 기준)에 잡히지 않는다 — 센서가
+        # 고장 났는데 "그냥 멀리 있음"으로 보여 analyze_logs.py의 센서 실명
+        # 경고를 그대로 통과한다. status 게이트가 꺼진 경우의 안전망이다.
+        if distance_mm > config.TOF_OUT_OF_RANGE_CM * 10:
             return config.TOF_OUT_OF_RANGE_CM
         return distance_mm / 10.0  # mm → cm
 

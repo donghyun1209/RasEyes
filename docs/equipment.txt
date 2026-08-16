@@ -18,8 +18,8 @@ KPI: E2E Latency < 500ms · 추론 < 60ms (15+ FPS) · On-device 100%
  방열판 + 쿨링 팬  보드 전용 세트               ✓ 구매완료
  오디오 출력       3.5mm Audio In/Out 잭         — 보드 내장 (HDMI 왼쪽)
  마이크            MIC                           — 보드 내장
- 카메라            USB 웹캠 또는 MIPI CSI 모듈   ✗ 미구매
- 스토리지          microSD A2 64GB               ✗ 미구매
+ 카메라            USB 웹캠 또는 MIPI CSI 모듈   
+ 스토리지          microSD A2 64GB               
  점퍼 와이어       암-수 20cm 20개               확인 필요
  브레드보드        미니                          확인 필요
 
@@ -91,6 +91,7 @@ KPI: E2E Latency < 500ms · 추론 < 60ms (15+ FPS) · On-device 100%
    센서 GND  → 핀 6  (GND)    ← 핀 2·4는 5V — 반드시 핀 6 사용
    센서 SDA  → 핀 3  (GPIO1_B7 / I2C5_SDA_M3)
    센서 SCL  → 핀 5  (GPIO1_B6 / I2C5_SCL_M3)
+
 
 ================================================================
  4. Orange Pi 5 — 기본 OS 세팅

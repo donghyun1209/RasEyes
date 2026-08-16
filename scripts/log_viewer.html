@@ -1,0 +1,1085 @@
+<!doctype html>
+<html lang="ko" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RasEyes 로그 뷰어</title>
+<style>
+/* ── 토큰 ─────────────────────────────────────────────────────────────── */
+:root {
+  color-scheme: light;
+  --surface:       #fcfcfb;   /* 카드·그래프 바탕 */
+  --plane:         #f9f9f7;   /* 페이지 바탕 */
+  --ink:           #0b0b0b;
+  --ink-2:         #52514e;
+  --ink-muted:     #898781;
+  --grid:          #e1e0d9;
+  --axis:          #c3c2b7;
+  --border:        rgba(11,11,11,0.10);
+  --series:        #2a78d6;   /* 단일 시리즈 (검증 통과: 라이트/다크) */
+  --series-soft:   rgba(42,120,214,0.12);
+  --good:          #0ca30c;
+  --warning:       #fab219;
+  --serious:       #ec835a;
+  --critical:      #d03b3b;
+  --hover:         rgba(11,11,11,0.05);
+  --shadow:        0 1px 2px rgba(11,11,11,0.06);
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface:       #1a1a19;
+  --plane:         #0d0d0d;
+  --ink:           #ffffff;
+  --ink-2:         #c3c2b7;
+  --ink-muted:     #898781;
+  --grid:          #2c2c2a;
+  --axis:          #383835;
+  --border:        rgba(255,255,255,0.10);
+  --series:        #3987e5;
+  --series-soft:   rgba(57,135,229,0.18);
+  --hover:         rgba(255,255,255,0.06);
+  --shadow:        none;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--plane);
+  color: var(--ink);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  display: flex;
+  flex-direction: column;
+}
+h1, h2, h3, h4 { margin: 0; font-weight: 600; }
+button { font: inherit; color: inherit; cursor: pointer; }
+
+/* ── 상단바 ───────────────────────────────────────────────────────────── */
+.topbar {
+  display: flex; align-items: center; gap: 16px;
+  padding: 12px 20px; background: var(--surface);
+  border-bottom: 1px solid var(--border); flex: 0 0 auto;
+}
+.brand { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }
+.topbar .meta { color: var(--ink-muted); font-size: 12px; margin-left: auto;
+  text-align: right; font-variant-numeric: tabular-nums; }
+.icon-btn {
+  background: none; border: 1px solid var(--border); border-radius: 6px;
+  padding: 5px 10px; font-size: 12px; color: var(--ink-2);
+}
+.icon-btn:hover { background: var(--hover); }
+
+/* ── 레이아웃 ─────────────────────────────────────────────────────────── */
+.layout { flex: 1; display: flex; min-height: 0; }
+.sidebar {
+  width: 348px; flex: 0 0 348px; border-right: 1px solid var(--border);
+  background: var(--surface); display: flex; flex-direction: column; min-height: 0;
+}
+.detail { flex: 1; min-width: 0; overflow-y: auto; padding: 20px 24px 48px; }
+
+/* ── 캘린더 ───────────────────────────────────────────────────────────── */
+.cal { padding: 14px 14px 10px; border-bottom: 1px solid var(--border); }
+.cal-head { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; }
+.cal-head h2 { font-size: 15px; flex: 1; }
+.cal-dow, .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; }
+.cal-dow div {
+  text-align: center; font-size: 10px; font-weight: 700; letter-spacing: 0.05em;
+  color: var(--ink-muted); padding-bottom: 4px;
+}
+.cal-cell {
+  aspect-ratio: 1 / 1; border: 1px solid transparent; border-radius: 6px;
+  background: none; padding: 3px 0 0; display: flex; flex-direction: column;
+  align-items: center; gap: 2px; font-variant-numeric: tabular-nums;
+  color: var(--ink-2); font-size: 12px;
+}
+.cal-cell.pad { color: var(--ink-muted); opacity: 0.4; cursor: default; }
+.cal-cell.has-data { background: var(--series-soft); color: var(--ink); font-weight: 600; }
+.cal-cell:not(.pad):hover { border-color: var(--axis); }
+.cal-cell.sel { border-color: var(--series); background: var(--series-soft); color: var(--ink); }
+.cal-cell .dots { display: flex; gap: 2px; height: 5px; }
+/* 셀 안과 범례에서 같은 점을 쓴다 (.cal-cell 하위로 스코프하면 범례가 빈다). */
+.dot { display: inline-block; width: 5px; height: 5px; border-radius: 50%; }
+.dot.d-clip { background: var(--series); }
+.dot.d-warning { background: var(--warning); }
+.dot.d-critical { background: var(--critical); }
+.cal-legend {
+  display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px;
+  font-size: 10px; color: var(--ink-muted);
+}
+.cal-legend span { display: inline-flex; align-items: center; gap: 4px; }
+
+/* ── 날짜별 목록 ──────────────────────────────────────────────────────── */
+.daylist { flex: 1; overflow-y: auto; padding: 12px 14px 24px; }
+.daylist h3 { font-size: 13px; margin-bottom: 8px; }
+.daylist .group-title {
+  font-size: 10px; font-weight: 700; letter-spacing: 0.05em; color: var(--ink-muted);
+  margin: 14px 0 6px;
+}
+.row-btn {
+  width: 100%; text-align: left; background: none; border: 1px solid var(--border);
+  border-radius: 7px; padding: 8px 10px; margin-bottom: 5px; display: flex;
+  align-items: center; gap: 9px;
+}
+.row-btn:hover { background: var(--hover); }
+.row-btn.sel { border-color: var(--series); background: var(--series-soft); }
+.row-btn .r-main { flex: 1; min-width: 0; }
+.row-btn .r-title { font-size: 12.5px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.row-btn .r-sub {
+  font-size: 11px; color: var(--ink-muted); font-variant-numeric: tabular-nums;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.thumb {
+  width: 44px; height: 33px; border-radius: 4px; object-fit: cover;
+  background: var(--grid); flex: 0 0 auto;
+}
+.pill {
+  font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 999px;
+  border: 1px solid currentColor; white-space: nowrap;
+}
+.pill.p-critical { color: var(--critical); }
+.pill.p-warning  { color: var(--warning); }
+.pill.p-muted    { color: var(--ink-muted); }
+.empty { color: var(--ink-muted); font-size: 12px; padding: 8px 0; }
+
+/* ── 상세 공통 ────────────────────────────────────────────────────────── */
+.card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  padding: 16px 18px; margin-bottom: 16px; box-shadow: var(--shadow);
+}
+.card > h3 { font-size: 13px; margin-bottom: 12px; }
+.detail-head { margin-bottom: 16px; }
+.detail-head h2 { font-size: 19px; letter-spacing: -0.01em; }
+.detail-head .sub {
+  color: var(--ink-muted); font-size: 12.5px; margin-top: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.placeholder { color: var(--ink-muted); padding: 60px 0; text-align: center; }
+
+/* ── KPI 타일 ─────────────────────────────────────────────────────────── */
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 10px; }
+.tile { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+.tile .t-label { font-size: 11px; color: var(--ink-2); display: flex; align-items: center; gap: 4px; }
+.tile .t-value { font-size: 22px; font-weight: 600; margin-top: 2px; letter-spacing: -0.01em; }
+.tile .t-value .u { font-size: 12px; font-weight: 400; color: var(--ink-muted); margin-left: 2px; }
+.tile .t-sub { font-size: 11px; color: var(--ink-muted); font-variant-numeric: tabular-nums; }
+.tile.na .t-value { color: var(--ink-muted); font-size: 15px; font-weight: 400; }
+.tile.s-critical { border-color: var(--critical); }
+.tile.s-warning  { border-color: var(--warning); }
+.tile .flag { font-size: 11px; font-weight: 600; display: block; margin-top: 2px; }
+.tile.s-critical .flag { color: var(--critical); }
+.tile.s-warning .flag  { color: var(--warning); }
+
+/* ── 그래프 ───────────────────────────────────────────────────────────── */
+.chartstack { position: relative; }
+.chart { margin-bottom: 2px; }
+.chart-head {
+  display: flex; align-items: baseline; gap: 8px; padding-left: 4px; margin-bottom: 1px;
+}
+.chart-title { font-size: 11.5px; font-weight: 600; }
+.chart-note { font-size: 10.5px; color: var(--ink-muted); font-variant-numeric: tabular-nums; }
+.chart svg { display: block; }
+.chart.na .chart-title { color: var(--ink-muted); font-weight: 400; }
+.crosshair {
+  position: absolute; top: 0; bottom: 0; width: 1px; background: var(--axis);
+  pointer-events: none; display: none;
+}
+.tip {
+  position: absolute; z-index: 5; pointer-events: none; display: none;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 10px; font-size: 11.5px; box-shadow: 0 4px 14px rgba(0,0,0,0.14);
+  min-width: 168px; font-variant-numeric: tabular-nums;
+}
+.tip .tip-time { font-weight: 600; margin-bottom: 4px; }
+.tip dl { display: grid; grid-template-columns: auto auto; gap: 1px 10px; margin: 0; }
+.tip dt { color: var(--ink-muted); }
+.tip dd { margin: 0; text-align: right; }
+.tip .tip-tts { margin-top: 5px; padding-top: 5px; border-top: 1px solid var(--border); color: var(--series); }
+
+/* ── 표 보기 ──────────────────────────────────────────────────────────── */
+.table-wrap { overflow-x: auto; max-height: 460px; overflow-y: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 11.5px; font-variant-numeric: tabular-nums; }
+th, td { padding: 4px 8px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--grid); }
+th { position: sticky; top: 0; background: var(--surface); text-align: right;
+  font-size: 10px; letter-spacing: 0.03em; color: var(--ink-2); }
+th:first-child, td:first-child { text-align: left; }
+td.na { color: var(--ink-muted); }
+
+/* ── 클립 ─────────────────────────────────────────────────────────────── */
+.clip-view { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(240px, 1fr); gap: 18px; }
+.clip-figure { position: relative; line-height: 0; }
+.clip-figure img { width: 100%; border-radius: 8px; border: 1px solid var(--border); }
+.clip-figure svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 5px 14px; font-size: 12.5px; }
+.kv dt { color: var(--ink-muted); }
+.kv dd { margin: 0; font-variant-numeric: tabular-nums; }
+figcaption { font-size: 11.5px; color: var(--ink-muted); margin-top: 8px; line-height: 1.45; }
+
+@media (max-width: 900px) {
+  .layout { flex-direction: column; }
+  .sidebar { width: auto; flex: 0 0 auto; border-right: none; border-bottom: 1px solid var(--border); }
+  .clip-view { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">RasEyes 로그 뷰어</div>
+  <button class="icon-btn" id="btn-refresh" title="디스크를 다시 읽습니다">다시 읽기</button>
+  <button class="icon-btn" id="btn-theme">다크</button>
+  <div class="meta" id="topmeta">불러오는 중…</div>
+</header>
+
+<div class="layout">
+  <aside class="sidebar">
+    <div class="cal">
+      <div class="cal-head">
+        <h2 id="cal-title">—</h2>
+        <button class="icon-btn" id="cal-prev" aria-label="이전 달">‹</button>
+        <button class="icon-btn" id="cal-next" aria-label="다음 달">›</button>
+        <button class="icon-btn" id="cal-latest">최신</button>
+      </div>
+      <div class="cal-dow"><div>월</div><div>화</div><div>수</div><div>목</div><div>금</div><div>토</div><div>일</div></div>
+      <div class="cal-grid" id="cal-grid"></div>
+      <div class="cal-legend">
+        <span><i class="dot d-clip"></i>클립</span>
+        <span><i class="dot d-warning"></i>주의 지표</span>
+        <span><i class="dot d-critical"></i>KPI 위반</span>
+      </div>
+    </div>
+    <div class="daylist" id="daylist"><div class="empty">날짜를 고르세요.</div></div>
+  </aside>
+
+  <main class="detail" id="detail">
+    <div class="placeholder">왼쪽에서 세션이나 클립을 고르세요.</div>
+  </main>
+</div>
+
+<script>
+"use strict";
+
+/* ══ 상태 ══════════════════════════════════════════════════════════════ */
+const S = {
+  index: null,        // /api/index 응답
+  month: null,        // 캘린더가 보여주는 달 (Date, 1일)
+  day: null,          // 선택된 날짜 "YYYY-MM-DD"
+  view: null,         // {kind:'session'|'clip', id}
+  series: null,       // 선택된 세션의 시계열
+  charts: [],         // 렌더된 그래프 핸들 (크로스헤어용)
+  tableShown: 0,      // 표 보기에 그린 행 수
+};
+
+const $ = (sel) => document.querySelector(sel);
+const el = (tag, cls, text) => {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined) n.textContent = text;
+  return n;
+};
+
+/* ══ 포맷 ══════════════════════════════════════════════════════════════ */
+const NA = "—";
+const fmt = (v, d = 1) => (v === null || v === undefined || Number.isNaN(v)) ? NA : v.toFixed(d);
+const pct = (v, d = 1) => (v === null || v === undefined) ? NA : (v * 100).toFixed(d) + "%";
+const hhmm = (iso) => iso.slice(11, 16);
+const hhmmss = (iso) => iso.slice(11, 19);
+const dayKey = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+/** 초 오프셋을 mm:ss(또는 h:mm:ss)로. 세션 경과 시간 축에 쓴다. */
+function clock(sec) {
+  const s = Math.max(0, Math.round(sec));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
+  const mm = String(m).padStart(2, "0"), s2 = String(ss).padStart(2, "0");
+  return h > 0 ? `${h}:${mm}:${s2}` : `${m}:${s2}`;
+}
+/** 세션 시작 시각 + 오프셋 → 벽시계 문자열. */
+function wallClock(startIso, offsetSec) {
+  const t = new Date(startIso).getTime() + offsetSec * 1000;
+  const d = new Date(t);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")}`;
+}
+
+/* ══ 통신 ══════════════════════════════════════════════════════════════ */
+async function getJson(url) {
+  const res = await fetch(url);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data;
+}
+
+/* ══ 날짜별 상태 판정 ═══════════════════════════════════════════════════
+ * 캘린더 점은 "그날 로그를 열어볼 이유"를 나타낸다. KPI 위반(경보 분당 1회
+ * 이상, 스로틀, ToF 실명 의심)은 critical, 진단 경고선(노출 상한·노출 실패)은
+ * warning. 진단 컬럼이 없던 과거 세션은 판정하지 않는다 (0으로 뭉개지 않는다).
+ */
+function sessionFlags(s) {
+  const st = s.stats, flags = [];
+  if (st.has_diagnostics) {
+    if (st.emitted_per_min >= 1.0) flags.push(["critical", `경보 분당 ${st.emitted_per_min.toFixed(2)}회 (KPI 1회)`]);
+    if (st.tof_oor_ratio > 0.7) flags.push(["critical", `ToF OoR ${pct(st.tof_oor_ratio)} — 센서 실명 의심`]);
+  }
+  if (st.temp_throttle_ratio > 0) flags.push(["critical", `스로틀 구간 ${pct(st.temp_throttle_ratio)}`]);
+  if (st.latency_p95 > 500) flags.push(["critical", `레이턴시 p95 ${fmt(st.latency_p95)}ms (KPI 500ms)`]);
+  if (st.has_exposure_diag && (st.luma_dark_ratio + st.luma_blown_ratio) > 0.3)
+    flags.push(["warning", `쓸 수 없는 밝기 ${pct(st.luma_dark_ratio + st.luma_blown_ratio)}`]);
+  if (st.has_ae_ctrl_diag && st.exposure_rail_ratio > 0.3)
+    flags.push(["warning", `노출 상한 ${pct(st.exposure_rail_ratio)} — 모션블러 의심`]);
+  if (st.fps_fallback_ratio > 0.3) flags.push(["warning", `FPS fallback ${pct(st.fps_fallback_ratio)}`]);
+  return flags;
+}
+
+/* ══ 캘린더 ════════════════════════════════════════════════════════════ */
+function renderCalendar() {
+  const grid = $("#cal-grid");
+  grid.innerHTML = "";
+  const y = S.month.getFullYear(), m = S.month.getMonth();
+  $("#cal-title").textContent = `${y}년 ${m + 1}월`;
+
+  const first = new Date(y, m, 1);
+  const lead = (first.getDay() + 6) % 7;           // 월요일 시작
+  const days = new Date(y, m + 1, 0).getDate();
+  const sessionsByDay = new Map();
+  S.index.sessions.forEach((s) => {
+    if (!sessionsByDay.has(s.date)) sessionsByDay.set(s.date, []);
+    sessionsByDay.get(s.date).push(s);
+  });
+
+  for (let i = 0; i < lead; i++) grid.appendChild(el("div", "cal-cell pad"));
+  for (let d = 1; d <= days; d++) {
+    const key = dayKey(new Date(y, m, d));
+    const info = S.index.days[key];
+    const cell = el("button", "cal-cell");
+    cell.appendChild(el("span", null, String(d)));
+    const dots = el("div", "dots");
+    if (info) {
+      cell.classList.add("has-data");
+      let worst = null;
+      (sessionsByDay.get(key) || []).forEach((s) => {
+        sessionFlags(s).forEach(([tone]) => {
+          if (tone === "critical") worst = "critical";
+          else if (!worst) worst = "warning";
+        });
+      });
+      if (worst) dots.appendChild(el("i", "dot d-" + worst));
+      if (info.clips.length) dots.appendChild(el("i", "dot d-clip"));
+      cell.onclick = () => selectDay(key);
+      cell.title = `세션 ${info.sessions.length}개 · 클립 ${info.clips.length}개`;
+    } else {
+      cell.classList.add("pad");
+      cell.disabled = true;
+    }
+    if (key === S.day) cell.classList.add("sel");
+    cell.appendChild(dots);
+    grid.appendChild(cell);
+  }
+}
+
+function shiftMonth(delta) {
+  S.month = new Date(S.month.getFullYear(), S.month.getMonth() + delta, 1);
+  renderCalendar();
+}
+
+/* ══ 날짜별 목록 ═══════════════════════════════════════════════════════ */
+function selectDay(key) {
+  S.day = key;
+  const [y, m] = key.split("-").map(Number);
+  S.month = new Date(y, m - 1, 1);
+  renderCalendar();
+  renderDayList();
+}
+
+function renderDayList() {
+  const box = $("#daylist");
+  box.innerHTML = "";
+  const info = S.index.days[S.day];
+  if (!info) { box.appendChild(el("div", "empty", "이 날짜에는 기록이 없습니다.")); return; }
+
+  const [y, m, d] = S.day.split("-").map(Number);
+  box.appendChild(el("h3", null, `${m}월 ${d}일 (${y})`));
+
+  box.appendChild(el("div", "group-title", `세션 ${info.sessions.length}개`));
+  if (!info.sessions.length) box.appendChild(el("div", "empty", "세션 없음"));
+  info.sessions.forEach((id) => {
+    const s = S.index.sessions[id];
+    const flags = sessionFlags(s);
+    const btn = el("button", "row-btn");
+    if (S.view && S.view.kind === "session" && S.view.id === id) btn.classList.add("sel");
+    const main = el("div", "r-main");
+    main.appendChild(el("div", "r-title", `${hhmm(s.start)} – ${hhmm(s.end)}`));
+    main.appendChild(el("div", "r-sub",
+      `${s.stats.duration_min.toFixed(1)}분 · ${s.stats.rows}행 · FPS ${s.stats.fps_median.toFixed(0)}`));
+    btn.appendChild(main);
+    if (flags.length) {
+      const tone = flags.some(([t]) => t === "critical") ? "critical" : "warning";
+      btn.appendChild(el("span", "pill p-" + tone, tone === "critical" ? "KPI 위반" : "주의"));
+    }
+    btn.onclick = () => showSession(id);
+    box.appendChild(btn);
+  });
+
+  box.appendChild(el("div", "group-title", `클립 ${info.clips.length}개`));
+  if (!info.clips.length) box.appendChild(el("div", "empty", "클립 없음"));
+  info.clips.forEach((cid) => {
+    const c = S.index.clips.find((x) => x.id === cid);
+    const btn = el("button", "row-btn");
+    if (S.view && S.view.kind === "clip" && S.view.id === cid) btn.classList.add("sel");
+    if (c.broken) {
+      btn.appendChild(el("div", "thumb"));
+    } else {
+      const img = el("img", "thumb");
+      img.loading = "lazy";
+      img.alt = "";
+      img.src = `/clip/${encodeURIComponent(c.id)}/${encodeURIComponent(c.image)}`;
+      btn.appendChild(img);
+    }
+    const main = el("div", "r-main");
+    main.appendChild(el("div", "r-title",
+      `${hhmmss(c.ts)} · ${c.broken ? "읽을 수 없음" : (c.label ?? "?")}`));
+    main.appendChild(el("div", "r-sub", c.broken
+      ? `${c.empty_files}/${c.file_count} 파일이 0바이트`
+      : `${fmt(c.distance_cm)}cm · ${c.risk_level ?? "?"}${c.tof_only_mode ? " · ToF 단독" : ""}`));
+    btn.appendChild(main);
+    if (c.broken) btn.appendChild(el("span", "pill p-warning", "손상"));
+    btn.onclick = () => showClip(cid);
+    box.appendChild(btn);
+  });
+}
+
+/* ══ 세션 상세 ═════════════════════════════════════════════════════════ */
+async function showSession(id) {
+  S.view = { kind: "session", id };
+  S.tableShown = 0;
+  location.hash = `s=${id}`;   // 새로고침·링크 공유로 같은 화면에 돌아오기 위함
+  renderDayList();
+  $("#detail").innerHTML = '<div class="placeholder">세션을 불러오는 중…</div>';
+  try {
+    S.series = await getJson(`/api/session?id=${id}`);
+  } catch (err) {
+    $("#detail").innerHTML = "";
+    $("#detail").appendChild(el("div", "placeholder", "불러오기 실패: " + err.message));
+    return;
+  }
+  renderSession();
+}
+
+/** KPI 타일 정의. `na`가 true면 값 대신 "미측정"을 보여준다 (0으로 뭉개지 않는다). */
+function tileSpecs(st, th) {
+  const noDiag = !st.has_diagnostics, noExp = !st.has_exposure_diag, noAe = !st.has_ae_ctrl_diag;
+  const unusable = st.luma_dark_ratio + st.luma_blown_ratio;
+  return [
+    { label: "FPS (중앙)", value: st.fps_median.toFixed(0),
+      sub: `평균 ${fmt(st.fps_mean)} · ${th.target_fps}FPS 방어율 ${pct(st.fps_kpi_ratio, 0)}` },
+    { label: `FPS fallback (<${th.fps_fallback})`, value: pct(st.fps_fallback_ratio, 1),
+      status: st.fps_fallback_ratio > 0.3 ? "warning" : null,
+      flag: st.fps_fallback_ratio > 0.3 ? "비전 실명 구간 많음" : null },
+    { label: "E2E 레이턴시 p95", value: fmt(st.latency_p95, 0), unit: "ms",
+      sub: `평균 ${fmt(st.latency_mean, 0)}ms · ${th.latency_warn_ms}ms 초과 ${pct(st.latency_over_ratio, 0)}`,
+      status: st.latency_p95 > 500 ? "critical" : (st.latency_p95 > th.latency_warn_ms ? "warning" : null),
+      flag: st.latency_p95 > 500 ? "KPI 500ms 초과" : null },
+    { label: "CPU 최고 온도", value: fmt(st.temp_max), unit: "°C",
+      sub: `평균 ${fmt(st.temp_mean)}°C · 스로틀 ${pct(st.temp_throttle_ratio, 0)}`,
+      status: st.temp_throttle_ratio > 0 ? "critical" : null,
+      flag: st.temp_throttle_ratio > 0 ? `${th.throttle_temp_c}°C 초과 구간 있음` : null },
+    { label: "경보 발화 (분당)", na: noDiag, value: fmt(st.emitted_per_min, 2), unit: "회",
+      sub: `총 ${st.emitted}회 · KPI 1회/분 미만`,
+      status: st.emitted_per_min >= 1 ? "critical" : null,
+      flag: st.emitted_per_min >= 1 ? "KPI 위반" : null },
+    { label: "위험 상태 시간", value: st.alerts.toFixed(0), unit: "초",
+      sub: `분당 ${fmt(st.alerts_per_min, 1)}초 (거리 임계값 이내)` },
+    { label: "ToF OoR", na: noDiag, value: pct(st.tof_oor_ratio, 1),
+      sub: `${th.tof_oor_cm}cm 이상 측정 비율`,
+      status: st.tof_oor_ratio > 0.7 ? "critical" : null,
+      flag: st.tof_oor_ratio > 0.7 ? "센서 실명 의심" : null },
+    { label: "ToF 단독 모드", na: noDiag, value: pct(st.tof_only_ratio, 1),
+      sub: "높을수록 카메라가 못 보고 있음" },
+    { label: "프레임 밝기 (평균)", na: noExp, value: fmt(st.luma_mean, 0),
+      sub: `암흑 ${pct(st.luma_dark_ratio, 0)} · 화이트아웃 ${pct(st.luma_blown_ratio, 0)}`,
+      status: unusable > 0.3 ? "warning" : null,
+      flag: unusable > 0.3 ? "노출 제어 실패 의심" : null },
+    { label: "탐지 없음", na: noExp, value: pct(st.no_detect_ratio, 1),
+      sub: "프레임에서 아무것도 못 찾은 사이클" },
+    { label: "MID 억제 (분당)", na: noExp, value: fmt(st.mid_suppressed_per_min, 2), unit: "회",
+      sub: `총 ${st.mid_suppressed}회 · 클립으로 사후 검증 필요` },
+    { label: "노출 상한 도달", na: noAe, value: pct(st.exposure_rail_ratio, 1),
+      sub: `평균 ${fmt(st.exposure_mean, 0)} / 상한 ${th.exposure_max}`,
+      status: st.exposure_rail_ratio > 0.3 ? "warning" : null,
+      flag: st.exposure_rail_ratio > 0.3 ? "모션블러 의심" : null },
+    { label: "게인 상한 도달", na: noAe, value: pct(st.gain_rail_ratio, 1),
+      sub: `평균 ${fmt(st.gain_mean, 0)} / 상한 ${th.gain_max} (높을수록 노이즈)` },
+    { label: "카메라 가림 경고", value: st.occlusions.toFixed(0), unit: "회",
+      sub: "고정 거치 + 정적 장면에서는 오탐이 잦다" },
+  ];
+}
+
+function renderSession() {
+  const d = $("#detail");
+  const { meta } = S.series, st = meta.stats, th = S.index.thresholds;
+  d.innerHTML = "";
+
+  const head = el("div", "detail-head");
+  head.appendChild(el("h2", null, `${meta.date} ${hhmm(meta.start)} – ${hhmm(meta.end)}`));
+  head.appendChild(el("div", "sub",
+    `${meta.source}${meta.seq ? ` #${meta.seq}` : ""} · ${st.duration_min.toFixed(1)}분 · ${st.rows}행`));
+  d.appendChild(head);
+
+  // ── KPI 타일
+  const kpiCard = el("div", "card");
+  kpiCard.appendChild(el("h3", null, "세션 KPI"));
+  const tiles = el("div", "tiles");
+  tileSpecs(st, th).forEach((spec) => {
+    const t = el("div", "tile" + (spec.na ? " na" : "") + (spec.status && !spec.na ? " s-" + spec.status : ""));
+    t.appendChild(el("div", "t-label", spec.label));
+    const v = el("div", "t-value");
+    if (spec.na) {
+      v.textContent = "미측정";
+      t.appendChild(v);
+      t.appendChild(el("div", "t-sub", "이 지표가 없던 시기의 세션입니다"));
+    } else {
+      v.textContent = spec.value;
+      if (spec.unit) v.appendChild(el("span", "u", spec.unit));
+      t.appendChild(v);
+      if (spec.sub) t.appendChild(el("div", "t-sub", spec.sub));
+      // 상태색은 단독으로 의미를 지지 않는다 — 문구를 항상 함께 붙인다.
+      if (spec.status && spec.flag) t.appendChild(el("span", "flag", "⚠ " + spec.flag));
+    }
+    tiles.appendChild(t);
+  });
+  kpiCard.appendChild(tiles);
+  d.appendChild(kpiCard);
+
+  // ── 그래프
+  const chartCard = el("div", "card");
+  const ch = el("h3", null, "시계열");
+  chartCard.appendChild(ch);
+  const stack = el("div", "chartstack");
+  stack.id = "chartstack";
+  chartCard.appendChild(stack);
+  d.appendChild(chartCard);
+
+  // ── 표 보기 (그래프의 접근 가능한 쌍둥이)
+  const tableCard = el("div", "card");
+  const th3 = el("h3", null, "표로 보기");
+  const toggle = el("button", "icon-btn", "펼치기");
+  toggle.style.marginLeft = "8px";
+  th3.appendChild(toggle);
+  tableCard.appendChild(th3);
+  const tableBody = el("div");
+  tableBody.style.display = "none";
+  tableCard.appendChild(tableBody);
+  toggle.onclick = () => {
+    const open = tableBody.style.display === "none";
+    tableBody.style.display = open ? "" : "none";
+    toggle.textContent = open ? "접기" : "펼치기";
+    if (open && !S.tableShown) renderTable(tableBody);
+  };
+  d.appendChild(tableCard);
+
+  drawCharts();
+}
+
+/* ══ 그래프 렌더 ═══════════════════════════════════════════════════════
+ * 소형 다중 그래프: 지표마다 축 하나, 시간축은 공유한다. 스케일이 다른 두
+ * 지표를 한 판에 겹치면(이중 축) 없는 상관관계가 보이므로 쓰지 않는다.
+ */
+// PAD_R은 임계선 라벨 전용 여백이다. 플롯 안에 라벨을 넣으면 데이터 선이 그
+// 위를 지나가 둘 다 못 읽는다 (2026-08-10 실측: 야간 세션의 HIGH/MID 라벨).
+const PAD_L = 54, PAD_R = 62, PLOT_H = 74, LINE_TOP = 4;
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+function svgEl(tag, attrs) {
+  const n = document.createElementNS(SVG_NS, tag);
+  for (const k in attrs) n.setAttribute(k, attrs[k]);
+  return n;
+}
+
+function chartSpecs(th) {
+  return [
+    { key: "fps", title: "FPS", lines: [
+        { v: th.target_fps, label: `목표 ${th.target_fps}`, tone: "good" },
+        { v: th.fps_fallback, label: `fallback <${th.fps_fallback}`, tone: "critical" }] },
+    { key: "tof_raw_cm", title: "ToF 거리 (원시)", unit: "cm", lines: [
+        { v: th.high_risk_cm, label: `HIGH ${th.high_risk_cm}`, tone: "critical" },
+        { v: th.mid_risk_cm, label: `MID ${th.mid_risk_cm}`, tone: "warning" },
+        { v: th.tof_oor_cm, label: `OoR ${th.tof_oor_cm}`, tone: "muted" }] },
+    { key: "latency_ms", title: "E2E 레이턴시", unit: "ms", lines: [
+        { v: th.latency_warn_ms, label: `경고 ${th.latency_warn_ms}`, tone: "warning" },
+        { v: 500, label: "KPI 500", tone: "critical" }] },
+    { key: "frame_luma", title: "프레임 휘도", lines: [
+        { v: th.luma_min, label: `암흑 ${th.luma_min}`, tone: "critical" },
+        { v: th.luma_max, label: `과다 ${th.luma_max}`, tone: "critical" }] },
+    { key: "exposure", title: "노출", lines: [
+        { v: th.exposure_max, label: `상한 ${th.exposure_max}`, tone: "warning" }] },
+    { key: "gain", title: "아날로그 게인", lines: [
+        { v: th.gain_max, label: `상한 ${th.gain_max}`, tone: "warning" }] },
+    { key: "cpu_temp", title: "CPU 온도", unit: "°C", lines: [
+        { v: th.throttle_temp_c, label: `스로틀 ${th.throttle_temp_c}`, tone: "critical" }] },
+  ];
+}
+
+const TONE_VAR = { good: "--good", warning: "--warning", critical: "--critical", muted: "--ink-muted" };
+
+function drawCharts() {
+  const stack = $("#chartstack");
+  if (!stack) return;
+  stack.innerHTML = "";
+  S.charts = [];
+
+  const width = Math.max(360, stack.clientWidth);
+  const plotW = width - PAD_L - PAD_R;
+  const t = S.series.t, tMin = t[0], tMax = t[t.length - 1] || 1;
+  const span = Math.max(tMax - tMin, 1);
+  const xOf = (tv) => PAD_L + ((tv - tMin) / span) * plotW;
+
+  chartSpecs(S.index.thresholds).forEach((spec) => {
+    const values = S.series.num[spec.key] || [];
+    const present = values.filter((v) => v !== null);
+    const row = el("div", "chart");
+    const head = el("div", "chart-head");
+    head.appendChild(el("span", "chart-title", spec.title + (spec.unit ? ` (${spec.unit})` : "")));
+
+    if (!present.length) {
+      row.classList.add("na");
+      head.appendChild(el("span", "chart-note", "미측정 — 이 지표가 없던 시기의 세션입니다"));
+      row.appendChild(head);
+      stack.appendChild(row);
+      return;
+    }
+
+    let lo = Math.min(...present), hi = Math.max(...present);
+    // 임계선은 데이터가 닿을 만한 거리에 있을 때만 축에 넣는다. 멀리 있는 선(예:
+    // 항상 근거리인 세션의 OoR 400cm)을 억지로 포함시키면 정작 데이터가 납작해진다.
+    // 폭을 값의 크기로도 재는 이유: ToF가 167~168cm처럼 거의 안 변하면 데이터
+    // 범위가 1cm도 안 돼, 범위만 기준으로 삼으면 임계선이 전부 빠진다.
+    const raw = hi - lo || 1;
+    const reach = Math.max(raw, Math.abs(hi) * 0.5);
+    const shown = (spec.lines || []).filter((L) => L.v >= lo - reach && L.v <= hi + reach);
+    shown.forEach((L) => { lo = Math.min(lo, L.v); hi = Math.max(hi, L.v); });
+    const padY = (hi - lo || 1) * 0.08;
+    lo -= padY; hi += padY;
+    const yOf = (v) => LINE_TOP + PLOT_H - ((v - lo) / (hi - lo)) * PLOT_H;
+
+    head.appendChild(el("span", "chart-note",
+      `최소 ${fmt(Math.min(...present))} · 최대 ${fmt(Math.max(...present))}`));
+    row.appendChild(head);
+
+    const h = PLOT_H + LINE_TOP * 2;
+    const svg = svgEl("svg", { width, height: h, viewBox: `0 0 ${width} ${h}` });
+
+    // 그리드·축은 실선 헤어라인 (파선은 임계선 전용).
+    // 값이 내내 고정인 지표(상한에 붙은 노출 등)는 위아래 눈금이 같은 숫자라
+    // 겹쳐 찍히므로 한 번만 그린다.
+    const seenTick = new Set();
+    [lo + padY, hi - padY].forEach((v) => {
+      const text = fmt(v, Math.abs(v) < 10 ? 1 : 0);
+      if (seenTick.has(text)) return;
+      seenTick.add(text);
+      svg.appendChild(svgEl("line", {
+        x1: PAD_L, x2: width - PAD_R, y1: yOf(v), y2: yOf(v),
+        stroke: "var(--grid)", "stroke-width": 1 }));
+      const tx = svgEl("text", { x: PAD_L - 6, y: yOf(v) + 3.5, "text-anchor": "end",
+        fill: "var(--ink-muted)", "font-size": 9.5 });
+      tx.textContent = text;
+      svg.appendChild(tx);
+    });
+
+    // 임계선: 파선 + 직접 라벨 (색만으로 의미를 지지 않는다).
+    // 가까이 붙은 임계선끼리 라벨이 겹치므로(예: HIGH 100 / MID 150) 위에서부터
+    // 순서대로 최소 간격을 확보하며 아래로 밀어낸다.
+    const placed = shown.map((L) => ({ L, y: yOf(L.v) })).sort((a, b) => a.y - b.y);
+    let lastLabelY = -Infinity;
+    placed.forEach((p) => {
+      const color = `var(${TONE_VAR[p.L.tone]})`;
+      svg.appendChild(svgEl("line", { x1: PAD_L, x2: width - PAD_R, y1: p.y, y2: p.y,
+        stroke: color, "stroke-width": 1, "stroke-dasharray": "3 3", opacity: 0.75 }));
+      const labelY = Math.max(Math.max(9, p.y + 3), lastLabelY + 11);
+      lastLabelY = labelY;
+      const tx = svgEl("text", { x: width - PAD_R + 5, y: labelY,
+        fill: color, "font-size": 9.5 });
+      tx.textContent = p.L.label;
+      svg.appendChild(tx);
+    });
+
+    let d = "", pen = false;
+    for (let i = 0; i < values.length; i++) {
+      const v = values[i];
+      if (v === null) { pen = false; continue; }
+      d += (pen ? "L" : "M") + xOf(t[i]).toFixed(1) + " " + yOf(v).toFixed(1) + " ";
+      pen = true;
+    }
+    svg.appendChild(svgEl("path", { d: d.trim(), fill: "none", stroke: "var(--series)",
+      "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+
+    const marker = svgEl("circle", { r: 3.5, fill: "var(--series)", stroke: "var(--surface)",
+      "stroke-width": 2, visibility: "hidden" });
+    svg.appendChild(marker);
+    row.appendChild(svg);
+    stack.appendChild(row);
+    S.charts.push({ key: spec.key, values, yOf, marker });
+  });
+
+  drawEventStrip(stack, width, xOf, plotW);
+  drawTimeAxis(stack, width, xOf, tMin, tMax);
+  attachHover(stack, width, plotW, tMin, span);
+}
+
+/** 위험 상태(밴드) · 경보 발화(눈금) · 클립(삼각형)을 같은 시간축에 얹는다. */
+function drawEventStrip(stack, width, xOf, plotW) {
+  const H = 30;
+  const row = el("div", "chart");
+  const head = el("div", "chart-head");
+  head.appendChild(el("span", "chart-title", "경보"));
+  head.appendChild(el("span", "chart-note", "밴드=위험 상태 · 눈금=발화 · ▲=클립"));
+  row.appendChild(head);
+
+  const svg = svgEl("svg", { width, height: H, viewBox: `0 0 ${width} ${H}` });
+  const t = S.series.t;
+
+  // 위험 상태: 연속 구간을 하나의 밴드로 묶는다 (1초마다 사각형을 찍지 않는다).
+  let runStart = null;
+  for (let i = 0; i <= S.series.alert.length; i++) {
+    const on = S.series.alert[i] === 1;
+    if (on && runStart === null) runStart = i;
+    if (!on && runStart !== null) {
+      const x0 = xOf(t[runStart]), x1 = Math.max(xOf(t[i - 1]) + 1, x0 + 1.5);
+      svg.appendChild(svgEl("rect", { x: x0, y: 2, width: x1 - x0, height: 12,
+        fill: "var(--series-soft)", rx: 2 }));
+      runStart = null;
+    }
+  }
+  S.series.count.alerts_emitted.forEach((n, i) => {
+    if (!n) return;
+    svg.appendChild(svgEl("line", { x1: xOf(t[i]), x2: xOf(t[i]), y1: 2, y2: 14,
+      stroke: "var(--critical)", "stroke-width": 1.5 }));
+  });
+
+  const start = new Date(S.series.meta.start).getTime();
+  const end = new Date(S.series.meta.end).getTime();
+  S.index.clips.forEach((c) => {
+    const ts = new Date(c.ts).getTime();
+    if (ts < start - 2000 || ts > end + 2000) return;
+    const x = xOf((ts - start) / 1000);
+    const tri = svgEl("path", { d: `M${x - 4} ${H - 3} L${x + 4} ${H - 3} L${x} ${H - 11} Z`,
+      fill: "var(--series)" });
+    tri.style.cursor = "pointer";
+    tri.appendChild(svgEl("title", {})).textContent = `${hhmmss(c.ts)} ${c.label ?? ""} ${fmt(c.distance_cm)}cm`;
+    tri.onclick = () => showClip(c.id);
+    svg.appendChild(tri);
+  });
+
+  row.appendChild(svg);
+  stack.appendChild(row);
+}
+
+function drawTimeAxis(stack, width, xOf, tMin, tMax) {
+  const H = 18;
+  const svg = svgEl("svg", { width, height: H, viewBox: `0 0 ${width} ${H}` });
+  svg.appendChild(svgEl("line", { x1: PAD_L, x2: width - PAD_R, y1: 0.5, y2: 0.5,
+    stroke: "var(--axis)", "stroke-width": 1 }));
+  const ticks = 6;
+  for (let i = 0; i <= ticks; i++) {
+    const tv = tMin + ((tMax - tMin) * i) / ticks;
+    const anchor = i === 0 ? "start" : (i === ticks ? "end" : "middle");
+    const tx = svgEl("text", { x: xOf(tv), y: 12, "text-anchor": anchor,
+      fill: "var(--ink-muted)", "font-size": 9.5 });
+    tx.textContent = `${wallClock(S.series.meta.start, tv)} (${clock(tv)})`;
+    svg.appendChild(tx);
+  }
+  const row = el("div", "chart");
+  row.appendChild(svg);
+  stack.appendChild(row);
+}
+
+/** 크로스헤어 + 툴팁. 모든 지표를 한 시점에서 함께 읽는 것이 이 화면의 요점이다. */
+function attachHover(stack, width, plotW, tMin, span) {
+  const cross = el("div", "crosshair");
+  const tip = el("div", "tip");
+  stack.appendChild(cross);
+  stack.appendChild(tip);
+  const t = S.series.t;
+
+  stack.onmousemove = (ev) => {
+    const box = stack.getBoundingClientRect();
+    const mx = ev.clientX - box.left;
+    if (mx < PAD_L || mx > width - PAD_R) { hideHover(); return; }
+    const target = tMin + ((mx - PAD_L) / plotW) * span;
+    // t는 오름차순이라 이분 탐색으로 최근접 인덱스를 찾는다.
+    let lo = 0, hi = t.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (t[mid] < target) lo = mid + 1; else hi = mid;
+    }
+    if (lo > 0 && Math.abs(t[lo - 1] - target) < Math.abs(t[lo] - target)) lo--;
+
+    const x = PAD_L + ((t[lo] - tMin) / span) * plotW;
+    cross.style.display = "block";
+    cross.style.left = x + "px";
+    S.charts.forEach((c) => {
+      const v = c.values[lo];
+      if (v === null || v === undefined) { c.marker.setAttribute("visibility", "hidden"); return; }
+      c.marker.setAttribute("visibility", "visible");
+      c.marker.setAttribute("cx", x);
+      c.marker.setAttribute("cy", c.yOf(v));
+    });
+    renderTip(tip, lo, x, ev.clientY - box.top, width);
+  };
+  stack.onmouseleave = hideHover;
+
+  function hideHover() {
+    cross.style.display = "none";
+    tip.style.display = "none";
+    S.charts.forEach((c) => c.marker.setAttribute("visibility", "hidden"));
+  }
+}
+
+const TIP_ROWS = [
+  ["fps", "FPS", 0, ""], ["tof_raw_cm", "ToF 원시", 1, "cm"],
+  ["tof_distance_cm", "ToF 필터", 1, "cm"], ["latency_ms", "레이턴시", 0, "ms"],
+  ["frame_luma", "휘도", 0, ""], ["exposure", "노출", 0, ""], ["gain", "게인", 0, ""],
+  ["cpu_temp", "온도", 1, "°C"],
+];
+
+function renderTip(tip, i, x, my, width) {
+  tip.innerHTML = "";
+  tip.appendChild(el("div", "tip-time",
+    `${wallClock(S.series.meta.start, S.series.t[i])} · +${clock(S.series.t[i])}`));
+  const dl = el("dl");
+  TIP_ROWS.forEach(([key, label, digits, unit]) => {
+    const v = S.series.num[key] ? S.series.num[key][i] : null;
+    dl.appendChild(el("dt", null, label));
+    dl.appendChild(el("dd", null, v === null || v === undefined ? NA : fmt(v, digits) + unit));
+  });
+  const emitted = S.series.count.alerts_emitted[i];
+  const mid = S.series.count.mid_suppressed[i];
+  dl.appendChild(el("dt", null, "상태"));
+  dl.appendChild(el("dd", null, S.series.alert[i] ? "위험" : "정상"));
+  if (emitted) { dl.appendChild(el("dt", null, "발화")); dl.appendChild(el("dd", null, `${emitted}회`)); }
+  if (mid) { dl.appendChild(el("dt", null, "MID 억제")); dl.appendChild(el("dd", null, `${mid}회`)); }
+  tip.appendChild(dl);
+  const spoken = S.series.tts.find((row) => row[0] === i);
+  if (spoken) tip.appendChild(el("div", "tip-tts", "🔊 " + spoken[1]));
+
+  tip.style.display = "block";
+  const w = tip.offsetWidth;
+  tip.style.left = Math.min(Math.max(8, x + 14), width - w - 8) + "px";
+  tip.style.top = Math.max(4, my - 12) + "px";
+}
+
+/* ══ 표 보기 ═══════════════════════════════════════════════════════════ */
+const TABLE_CHUNK = 500;
+const TABLE_COLS = [
+  ["fps", "FPS", 0], ["tof_raw_cm", "ToF 원시", 1], ["tof_distance_cm", "ToF 필터", 1],
+  ["latency_ms", "레이턴시", 1], ["frame_luma", "휘도", 1], ["exposure", "노출", 0],
+  ["gain", "게인", 0], ["cpu_temp", "온도", 1], ["tof_only_ratio", "ToF단독", 2],
+  ["no_detect_ratio", "탐지없음", 2],
+];
+
+function renderTable(box) {
+  box.innerHTML = "";
+  const wrap = el("div", "table-wrap");
+  const table = el("table");
+  const thead = el("thead"), hr = el("tr");
+  ["시각", ...TABLE_COLS.map(([, l]) => l), "위험", "발화", "MID억제", "TTS"]
+    .forEach((h) => hr.appendChild(el("th", null, h)));
+  thead.appendChild(hr);
+  table.appendChild(thead);
+  const tbody = el("tbody");
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+  box.appendChild(wrap);
+
+  const more = el("button", "icon-btn", "");
+  more.style.marginTop = "10px";
+  box.appendChild(more);
+  S.tableShown = 0;
+
+  const ttsMap = new Map(S.series.tts);
+  function appendRows() {
+    const end = Math.min(S.tableShown + TABLE_CHUNK, S.series.t.length);
+    for (let i = S.tableShown; i < end; i++) {
+      const tr = el("tr");
+      tr.appendChild(el("td", null, wallClock(S.series.meta.start, S.series.t[i])));
+      TABLE_COLS.forEach(([key, , digits]) => {
+        const v = S.series.num[key] ? S.series.num[key][i] : null;
+        tr.appendChild(el("td", v === null || v === undefined ? "na" : null,
+          v === null || v === undefined ? NA : v.toFixed(digits)));
+      });
+      tr.appendChild(el("td", null, S.series.alert[i] ? "위험" : ""));
+      tr.appendChild(el("td", null, S.series.count.alerts_emitted[i] || ""));
+      tr.appendChild(el("td", null, S.series.count.mid_suppressed[i] || ""));
+      tr.appendChild(el("td", null, ttsMap.get(i) || ""));
+      tbody.appendChild(tr);
+    }
+    S.tableShown = end;
+    const left = S.series.t.length - S.tableShown;
+    more.textContent = left ? `다음 ${Math.min(TABLE_CHUNK, left)}행 (${left}행 남음)` : "";
+    more.style.display = left ? "" : "none";
+  }
+  more.onclick = appendRows;
+  appendRows();
+}
+
+/* ══ 클립 상세 ═════════════════════════════════════════════════════════ */
+function showClip(id) {
+  const c = S.index.clips.find((x) => x.id === id);
+  if (!c) return;
+  S.view = { kind: "clip", id };
+  location.hash = `c=${encodeURIComponent(id)}`;
+  if (c.date !== S.day) selectDay(c.date); else renderDayList();
+
+  const d = $("#detail");
+  d.innerHTML = "";
+  const head = el("div", "detail-head");
+  head.appendChild(el("h2", null, c.broken
+    ? "읽을 수 없는 클립" : `${c.label ?? "장애물"} · ${fmt(c.distance_cm)}cm`));
+  head.appendChild(el("div", "sub", `${c.ts.slice(0, 10)} ${hhmmss(c.ts)} · ${c.id}`));
+  d.appendChild(head);
+
+  if (c.broken) {
+    const warn = el("div", "card");
+    warn.appendChild(el("h3", null, "⚠ meta.json을 읽지 못했습니다"));
+    const kv = el("dl", "kv");
+    [["원인", c.broken_reason],
+     ["0바이트 파일", `${c.empty_files} / ${c.file_count}개`],
+     ["시각 출처", "디렉터리 이름 (meta.json을 못 읽어 복원)"]]
+      .forEach(([k, v]) => { kv.appendChild(el("dt", null, k)); kv.appendChild(el("dd", null, v)); });
+    warn.appendChild(kv);
+    warn.appendChild(el("figcaption", null, c.empty_files === c.file_count
+      ? "모든 파일이 0바이트입니다 — 클립을 쓰는 도중 전원이 끊긴 흔적입니다. "
+        + "같은 시각의 journalctl 부팅 목록(--list-boots)과 대조하세요."
+      : "일부 파일만 남았습니다. 저장이 중간에 끊겼는지 확인하세요."));
+    d.appendChild(warn);
+    return;
+  }
+
+  const card = el("div", "card");
+  const view = el("div", "clip-view");
+
+  const figure = el("figure");
+  figure.style.margin = "0";
+  const fig = el("div", "clip-figure");
+  const img = el("img");
+  img.alt = `${c.label ?? "장애물"} 트리거 프레임`;
+  img.src = `/clip/${encodeURIComponent(c.id)}/${encodeURIComponent(c.image)}`;
+  fig.appendChild(img);
+  // 탐지 박스는 이미지가 실제로 그려진 뒤에 원본 해상도 기준으로 얹는다.
+  img.onload = () => {
+    if (!c.detections.length) return;
+    const svg = svgEl("svg", { viewBox: `0 0 ${img.naturalWidth} ${img.naturalHeight}`,
+      preserveAspectRatio: "none" });
+    c.detections.forEach((det) => {
+      const [x1, y1, x2, y2] = det.bbox;
+      svg.appendChild(svgEl("rect", { x: x1, y: y1, width: x2 - x1, height: y2 - y1,
+        fill: "none", stroke: "var(--series)", "stroke-width": 3 }));
+      // 상자가 라벨보다 좁으면 글자를 생략한다. 병 진열대처럼 탐지가 몰리면
+      // 라벨끼리 겹쳐 "bottlebottle0.60"처럼 아무것도 못 읽게 된다.
+      // 전체 목록은 오른쪽 패널이 빠짐없이 들고 있다.
+      const text = `${det.label} ${det.confidence.toFixed(2)}`;
+      if (x2 - x1 < text.length * 8.5) return;
+      const tx = svgEl("text", { x: x1 + 4, y: Math.max(14, y1 - 5),
+        fill: "var(--series)", "font-size": 16, "font-weight": 700,
+        stroke: "var(--surface)", "stroke-width": 3, "paint-order": "stroke" });
+      tx.textContent = text;
+      svg.appendChild(tx);
+    });
+    fig.appendChild(svg);
+  };
+  figure.appendChild(fig);
+  figure.appendChild(el("figcaption",
+    null, c.frame_count > 1
+      ? `클립 ${c.frame_count}장 중 트리거 시점 1장 (오프셋 ${fmt(c.offset_sec, 2)}초)`
+      : `트리거 프레임 (오프셋 ${fmt(c.offset_sec, 2)}초)`));
+  view.appendChild(figure);
+
+  const info = el("div");
+  const kv = el("dl", "kv");
+  const rows = [
+    ["위험 등급", c.risk_level ?? NA],
+    ["거리 (융합)", `${fmt(c.distance_cm)} cm`],
+    ["거리 (원시/필터)", `${fmt(c.raw_distance_cm)} / ${fmt(c.filtered_distance_cm)} cm`],
+    ["방향", c.direction ?? "—"],
+    ["ToF 단독 모드", c.tof_only_mode ? "예 (비전 실명)" : "아니오"],
+    ["직전 클립 이후 억제", c.suppressed === null || c.suppressed === undefined ? NA : `${c.suppressed}회`],
+    ["탐지", c.detections.length ? c.detections.map((x) => `${x.label} ${x.confidence.toFixed(2)}`).join(", ") : "없음"],
+  ];
+  rows.forEach(([k, v]) => { kv.appendChild(el("dt", null, k)); kv.appendChild(el("dd", null, String(v))); });
+  info.appendChild(kv);
+
+  // 이 클립을 포함하는 세션이 있으면 시계열로 건너뛸 수 있게 한다.
+  const ts = new Date(c.ts).getTime();
+  const owner = S.index.sessions.find(
+    (s) => ts >= new Date(s.start).getTime() - 2000 && ts <= new Date(s.end).getTime() + 2000);
+  if (owner) {
+    const jump = el("button", "icon-btn", "이 시각의 세션 시계열 보기");
+    jump.style.marginTop = "14px";
+    jump.onclick = () => showSession(owner.id);
+    info.appendChild(jump);
+  }
+  view.appendChild(info);
+  card.appendChild(view);
+  d.appendChild(card);
+}
+
+/* ══ 초기화 ════════════════════════════════════════════════════════════ */
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  $("#btn-theme").textContent = theme === "dark" ? "라이트" : "다크";
+  localStorage.setItem("raseyes-viewer-theme", theme);
+  if (S.series) drawCharts();
+}
+
+async function boot(refresh) {
+  $("#topmeta").textContent = "불러오는 중…";
+  try {
+    S.index = await getJson("/api/index" + (refresh ? "?refresh=1" : ""));
+  } catch (err) {
+    $("#topmeta").textContent = "인덱스 로드 실패: " + err.message;
+    return;
+  }
+  const days = Object.keys(S.index.days).sort();
+  $("#topmeta").textContent =
+    `${S.index.root} · 세션 ${S.index.sessions.length} · 클립 ${S.index.clips.length} · ` +
+    `기록 ${days.length}일` + (S.index.tz_fix_before ? " · TZ 보정 적용" : "");
+  if (!days.length) { $("#daylist").innerHTML = '<div class="empty">로그가 없습니다.</div>'; return; }
+  const latest = days[days.length - 1];
+  const [y, m] = latest.split("-").map(Number);
+  S.month = new Date(y, m - 1, 1);
+  selectDay(latest);
+
+  // URL 해시가 가리키는 화면을 복원하고, 없으면 빈 화면 대신 최근 세션을 연다.
+  const hash = decodeURIComponent(location.hash.slice(1));
+  const sessionId = /^s=(\d+)$/.exec(hash);
+  const clipId = /^c=(.+)$/.exec(hash);
+  if (sessionId && Number(sessionId[1]) < S.index.sessions.length) {
+    const id = Number(sessionId[1]);
+    selectDay(S.index.sessions[id].date);
+    showSession(id);
+  } else if (clipId && S.index.clips.some((c) => c.id === clipId[1])) {
+    showClip(clipId[1]);
+  } else {
+    const todays = S.index.days[latest].sessions;
+    if (todays.length) showSession(todays[todays.length - 1]);
+  }
+}
+
+$("#cal-prev").onclick = () => shiftMonth(-1);
+$("#cal-next").onclick = () => shiftMonth(1);
+$("#cal-latest").onclick = () => {
+  const days = Object.keys(S.index.days).sort();
+  if (days.length) selectDay(days[days.length - 1]);
+};
+$("#btn-refresh").onclick = () => boot(true);
+$("#btn-theme").onclick = () =>
+  applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+
+applyTheme(localStorage.getItem("raseyes-viewer-theme")
+  || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"));
+
+let resizeTimer = null;
+addEventListener("resize", () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => { if (S.series && S.view?.kind === "session") drawCharts(); }, 150);
+});
+
+boot(false);
+</script>
+</body>
+</html>

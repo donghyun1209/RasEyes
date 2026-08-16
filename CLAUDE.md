@@ -2,11 +2,11 @@
 
 ## 1. Project Overview
 * **RasEyes:** 시각장애인용 상단 사각지대(가슴~머리 높이) 장애물 탐지 웨어러블 엣지 AI 디바이스.
-* **Target HW:** Orange Pi 5 (4GB, RK3588S+NPU), USB 웹캠(미구매), VL53L1X(ToF), 3.5mm 이어폰 잭 출력.
+* **Target HW:** Orange Pi 5 (4GB, RK3588S+NPU), **OV13855 MIPI CSI 카메라**(`/dev/video11`, 센서 subdev `/dev/v4l-subdev2`), VL53L1X(ToF), 3.5mm 이어폰 잭 출력(ES8388, **card 2**). USB 웹캠은 미구매 — `vision/opencv_camera.py`는 CSI 초기화 실패 시 fallback 경로로만 남아 있다.
 * **Current Phase:** Orange Pi 5 배포 단계. PC(Linux, Python 3.13)에서 개발하고 OPi5로 배포(`raseyes.service`).
 * **Constraints:** 100% On-device, 외부 API/Cloud 사용 불가.
 * **KPIs:** End-to-End Latency < 500ms, 추론 < 60ms(15+ FPS), 탐지 Recall > 95%, 오탐지 < 1회/분.
-* **문서:** `docs/PRD.md`(요구사항), `docs/TRD.md`(기술 명세), `docs/1.0_ROADMAP.md`(v1.0 완료 기록), `docs/2.0_ROADMAP.md`(진행 중 로드맵), `docs/ToPost.md`(최신 작업 일지), `docs/checklist.md`(착용 테스트 체크리스트), `docs/equipment.txt`(장비 목록), `docs/wantToMake.md`(구현 아이디어 초안).
+* **문서:** `docs/PRD.md`(요구사항), `docs/TRD.md`(기술 명세), `docs/1.0_ROADMAP.md`(v1.0 완료 기록), `docs/2.0_ROADMAP.md`(v2.0 기록), **`docs/2.1_ROADMAP.md`(현재 진행 중 — 마감 2026-09-02, 신규 부품 구매 없음)**, `docs/ToPost.md`(최신 작업 일지), `docs/checklist.md`(착용 테스트 체크리스트), `docs/equipment.txt`(장비 목록), `docs/wantToMake.md`(구현 아이디어 초안).
 
 ## 2. Project Structure & Rules
 * `/vision`, `/sensor`, `/fusion`, `/audio`, `/logs`, `/scripts` 등 도메인별 폴더 분리. `main.py`는 오케스트레이션만 담당.
@@ -14,6 +14,7 @@
 * 입력(비전, 센서)과 출력(오디오)은 반드시 추상화 계층(HAL) 인터페이스를 적용하여, 현재의 PC 모킹 클래스와 추후 Orange Pi 5 하드웨어 제어 클래스를 쉽게 교체할 수 있도록 구현.
 * 상수 및 임계값은 매직 넘버 대신 `config.py`에 분리.
 * 타입 힌트와 구글 스타일 Docstring 필수 작성. 예외 처리 철저.
+* **물리 조작 수단은 내장 전원 버튼 1개뿐이고, 하는 일은 360° 스캔 트리거 하나다** (`sensor/power_button_handler.py`, evdev 배타 grab). 외장 GPIO 버튼과 음소거 기능(`sensor/button_handler.py`, `_toggle_mute`, `_mute_active`, `GPIO_BUTTON_PIN`)은 **2026-08-12에 제거했다** — 택트 스위치 2개가 모두 불량이었고, 음소거는 필요 없다고 판단했다(무음이 필요하면 이어폰을 뽑는다). ⚠ **grab 중에는 물리 종료가 불가능하다** — 끄려면 `ssh -t raseyes "sudo shutdown -h now"` (§8).
 
 ## 3. Core Logic (Sensor Fusion)
 * **High Risk:** 객체 인식됨 & ToF 거리 <= 100cm & Confidence >= MIN_CONFIDENCE. (즉각 경고 트리거)
@@ -50,7 +51,7 @@
   * ROI 적용 실패는 예외를 올리지 않고 경고만 남긴 뒤 전체 FoV로 계속한다 — 시야가 넓은 것보다 센서가 아예 없는 쪽이 훨씬 나쁘다.
   * ⚠️ 센서 데이터 만료로 안전 거리를 주입할 때는 `distance_is_new=True`로 넘겨야 한다. 게이트에 걸리면 만료 이전 거리가 필터에 남아 경보가 계속 나간다.
 * **경보 발화는 `fusion/alert_policy.py`가 게이트한다.** 위험 판정(`RiskLevel`)은 "거리 <= 임계값"인 **상태**라 그대로 흘리면 매 사이클 경보가 나간다 (2026-07-28 야외 실측: HIGH 상태 55.8%, 비프 분당 181회). `AlertPolicy`는 위험 수준이 **올라가는 순간**에만 통과시키고, 지속 중에는 `ALERT_REMINDER_SEC` 간격 리마인더만 허용한다. 해제는 `임계값 + ALERT_HYSTERESIS_CM`을 넘어야 이뤄져 임계값 근처 진동을 흡수한다.
-  * 음소거 해제(`_toggle_mute`)와 ToF 센서 재초기화(`_on_sensor_reinit`) 시 반드시 `AlertPolicy.reset()`을 호출한다. 래치가 남으면 실제 위험을 놓친다.
+  * ToF 센서 재초기화(`_on_sensor_reinit`) 시 반드시 `AlertPolicy.reset()`을 호출한다. 래치가 남으면 실제 위험을 놓친다. **경보 출력을 일시 정지시키는 경로를 새로 만든다면 해제 시점에도 똑같이 `reset()`을 부를 것** (2026-08-12에 삭제된 음소거 버튼이 그 사례였다).
   * 배터리 등 **시스템 경고는 정책을 우회**한다 (장애물 경보가 아니므로).
   * OoR(`TOF_OUT_OF_RANGE_CM`)은 히스테리시스와 무관하게 래치를 해제한다 — 측정 상한이 해제선보다 짧은 레인징 모드에서 영원히 안 풀리는 것을 막는 백스톱.
 
@@ -78,11 +79,13 @@
 | `pytest tests/test_fusion.py` | 퓨전 로직 단위 테스트 |
 | `bash scripts/pull_logs.sh` | Pi의 운영 CSV·이벤트 클립을 `logs_archive/`로 수집 (PC에서 실행) |
 | `python scripts/analyze_logs.py logs_archive/*.csv` | 수집한 CSV의 FPS·온도·경보 빈도 KPI 분석 |
+| `python scripts/log_viewer.py` | 로그 뷰어 웹 서버 (**PC에서 실행**, 표준 라이브러리만 사용). `analyze_logs.py`와 같은 KPI를 캘린더·시계열 그래프·이벤트 클립과 함께 브라우저에서 본다. 기본 `0.0.0.0:8765` 바인드라 tailscale 너머 기기에서 `http://<이 머신 IP>:8765`로 접속 가능. `--root logs`로 Pi 운영 폴더도 볼 수 있다 |
 | `python3 scripts/tof_range_bench.py --mode short --seconds 60` | VL53L1X 레인징 모드 실측 (**Pi에서 실행**). SHORT 전환 가부 판단용 — 범위 초과 시 반환값·유효 최대 거리·노이즈 측정 |
 | `python3 scripts/tof_status_probe.py --mode medium --seconds 30` | ToF RangeStatus 진단 (**Pi에서 실행, 서비스 정지 필요**). 거리값이 실제 측정인지 "표적 없음" 허수값인지 판정 — 센서 이상·오경보 조사의 1차 도구. **리포트에서 `[I2C 통신] 실패 N건`을 제일 먼저 볼 것** — 0건이 아니면 나머지 숫자는 측정이 아니다 |
 | `python3 scripts/tof_roi_probe.py` | ToF 시야(ROI) 방향 실측 (**Pi에서 실행, 서비스 정지 + 착용 각도 필요**). ⚠ ROI 자체는 근거가 무효화되어 보류 상태다(§3 참고) |
 | `python3 scripts/wb_probe.py --frames 30` | 카메라 채널 균형 진단 (**Pi에서 실행, 서비스 정지 필요**). AWB 도입 판단은 2026-08-04 수집 클립 분석으로 이미 끝났다(§10) — AWB 게인이 의심스러울 때 센서 원본 채널비를 직접 재는 용도로 남긴다 |
 | `python scripts/export_rknn.py` | YOLOv8n → RKNN INT8 변환 (**PC x86에서 실행**, `rknn-toolkit2` 필요). 결과물을 Pi로 scp |
+| `gh workflow run build_rknn.yml -f quant=true` | 같은 변환을 GitHub Actions에서 실행 (**로컬 `rknn-toolkit2` 설치 불필요**). 로컬 설치는 numpy 선설치 → fast-histogram 소스 빌드 → `--no-deps` 휠 순서를 지켜야 해 깨지기 쉽다. 결과물은 아티팩트 `yolov8n-rknn-rk3588` |
 | `python scripts/bench_rknn.py` | RKNN 추론 속도 실측 (**Pi에서 실행**). KPI(평균 <60ms) 달성 여부 판정 |
 | `python scripts/test_device.py` | Orange Pi 5 HAL 단품 테스트 (**Pi에서 실행**). 카메라·ToF·오디오 순차 검증, 전체 PASS 시 exit(0) |
 | `sudo python scripts/pwm_fan_control.py` | 액티브 쿨러 PWM 온도 기반 제어 (**Pi에서 실행, main.py와 별도 프로세스**) |

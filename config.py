@@ -151,8 +151,6 @@ TOF_ROI_BOT_RIGHT_X: int = 15
 TOF_ROI_BOT_RIGHT_Y: int = 8
 RKNN_MODEL_PATH: str = "yolov8n.rknn"          # NPU 추론 모델 경로
 RKNN_CORE_MASK: str = "NPU_CORE_0_1"           # RKNNLite NPU 코어 마스크 속성명
-GPIO_BUTTON_PIN: int = 26                      # 물리 버튼 GPIO 핀 번호
-GPIO_CHIP_PATH: str = "/dev/gpiochip1"         # 물리 버튼 gpiod 칩 장치 경로
 CPU_TEMP_SYSFS_PATH: str = "/sys/class/thermal/thermal_zone0/temp"  # CPU 온도 sysfs 경로
 
 # Audio Synthesis (sounddevice, 3.5mm jack)
@@ -297,3 +295,36 @@ VISION_BLIND_LUMA_MAX: float = 235.0
 # 진입/해제 모두 연속 프레임을 요구하고, 해제선에 여유를 둬 경계 진동을 흡수한다.
 VISION_BLIND_DEBOUNCE_FRAMES: int = 5
 VISION_BLIND_HYSTERESIS_LUMA: float = 15.0
+
+# === v2.1 STEP 4 — 360° 스캔 모드 트리거 ===
+# 외장 택트 스위치 모듈 2개가 전부 불량으로 확인돼(2026-08-11), 대안으로 보드
+# 내장 전원 버튼(rk805 pwrkey, /dev/input에 evdev 장치로 노출됨)을 배타적으로
+# grab해 트리거로 쓴다. grab 중엔 systemd-logind가 이 버튼을 못 보므로, 이
+# 핸들러가 살아있는 동안 물리 전원 버튼은 오직 스캔 트리거로만 동작한다.
+POWER_BUTTON_DEVICE_NAME: str = "rk805 pwrkey"
+
+# === v2.1 Phase 2-B/2-C — 360° 스캔 파이프라인 (동기 캡처·중복 제거·문장 조립) ===
+# 스캔 종료는 고정 시간도 비전 비교도 아니라 **버튼 재입력**이다(2026-08-12 결정).
+# 사람마다 한 바퀴 도는 속도가 달라 고정 30초로는 실제로 다 돌고도 한참 더 기다렸고,
+# 시작 화면과의 비전 비교(델타 임계값)로 바꿔봤지만 실측 없이 튜닝해야 하는 값이라
+# 신뢰도가 불확실했다. 사용자가 직접 끝을 알리는 쪽이 더 정확하고 연산도 적다.
+# 방위각도 실제 종료 시점의 경과시간을 분모로 쓰므로, 고정시간 가정에서 생기던
+# "회전이 빨리 끝나면 뒤/왼쪽이 나올 수 없는" 문제가 함께 풀린다.
+SCAN_MAX_DURATION_SEC: float = 45.0            # 사용자가 종료 버튼을 잊었을 때의 안전 상한
+# "turn around"가 아니라 "turn to your right"인 이유: 방위각을 시간만으로 추정하는
+# 방법 B(IMU 없음)는 회전 방향을 모르면 "오른쪽"/"왼쪽"이 뒤바뀔 수 있다. 회전 방향을
+# 문구로 고정하면 이 위험이 사라진다. "Please"/"Press"가 강한 파열음으로 시작해 어두
+# S 삼킴 함정도 피한다.
+#
+# ⚠️ "Please turn to your right. Scanning for N seconds." 형태로 실기 테스트했을 때
+# "Scanning"의 S가 들리지 않았다(2026-08-12) — 기존에 알려진 "어두(단어 첫머리) S
+# 삼킴"이 아니라 **마침표 뒤 새 문장이 시작되는 지점에서도 재현**된다는 뜻이다.
+# 아래 문구의 두 번째 문장도 "Press"로 시작해 이 함정을 피한다.
+SCAN_MODE_ANNOUNCEMENT: str = "Please turn to your right. Press again when you are done."
+# ToF 물리 주기(TOF_INTER_MEASUREMENT_MS=210ms)·저전력 비전 주기(250ms)보다 여유 있게 —
+# 새 ToF 샘플과 짝지을 비전 프레임이 이 시간보다 오래됐으면 동기로 보지 않는다.
+SCAN_SYNC_MAX_FRAME_AGE_SEC: float = 0.35
+# 같은 라벨을 "같은 물체"로 볼 최대 각도(회전 속도가 가변이라 초가 아니라 각도로 둔다 —
+# dedupe_captures가 호출 시점의 실제 회전 시간으로 초 단위로 환산한다).
+SCAN_AZIMUTH_CONTINUITY_DEG: float = 18.0
+SCAN_MAX_ANNOUNCE_ITEMS: int = 5               # 문장에 담을 최대 그룹 수

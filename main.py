@@ -32,11 +32,20 @@ from audio.piper_tts import PiperTts
 from audio.tts import EspeakTts
 from fusion.alert_policy import AlertPolicy
 from fusion.engine import FusionEngine, FusionResult, RiskLevel
+from fusion.scan import (
+    ScanCapture,
+    ScannedObject,
+    azimuth_direction,
+    build_scan_sentence,
+    dedupe_captures,
+    is_wall_reading,
+    try_pair_capture,
+)
 from logs.clip_recorder import ClipRecorder
 from logs.logger import CsvLogger
-from sensor.button_handler import ButtonHandler
 from sensor.interface import BaseToFHAL
 from sensor.mock import MockToFSensor
+from sensor.power_button_handler import PowerButtonHandler
 from vision.yolo_detector_hal import YoloDetector
 from vision.interface import DetectionResult, VisionInterface
 from vision.mock import MockVision
@@ -297,6 +306,24 @@ def _update_luma_blind(
     return blind, streak
 
 
+def _scan_should_finalize(now: float, scan_start_ts: float) -> bool:
+    """스캔 시작 후 SCAN_MAX_DURATION_SEC(안전 상한)가 지났는지 판정한다.
+
+    정상 경로는 사용자가 버튼을 다시 눌러 종료하는 것이고(_on_scan_trigger), 이
+    함수는 사용자가 종료를 잊었을 때의 안전망이다. now를 인자로 받는 순수 함수라
+    실제로 기다리지 않고 테스트할 수 있다 (CLAUDE.md §4 — 시간 의존 로직은
+    time.monotonic()을 내부에서 호출하지 않는다).
+
+    Args:
+        now: 현재 단조 시각 (초).
+        scan_start_ts: 스캔이 시작된 단조 시각 (초).
+
+    Returns:
+        경과 시간이 SCAN_MAX_DURATION_SEC 이상이면 True.
+    """
+    return now - scan_start_ts >= config.SCAN_MAX_DURATION_SEC
+
+
 def _put_latest(q: "queue.Queue", item: object) -> None:
     """큐에 최신 항목만 유지한다. 가득 차면 기존 항목을 버리고 교체."""
     try:
@@ -456,8 +483,16 @@ class RasEyesApp:
         self._v_thread: Optional[threading.Thread] = None
         self._s_thread: Optional[threading.Thread] = None
 
-        self._button_handler: Optional[ButtonHandler] = None
-        self._mute_active: bool = False
+        self._power_button_handler: Optional[PowerButtonHandler] = None
+
+        self._scan_active: bool = False
+        self._scan_start_ts: Optional[float] = None
+        self._scan_captures: List[ScanCapture] = []
+        # 벽 요약 — 스캔 전체에서 가장 가까운 "탐지 0개 + ToF 유효" 값 하나만 남긴다.
+        # dedupe_captures처럼 인스턴스로 쪼개면 회전 중 탐지가 끊겼다 이어지며 같은
+        # 벽이 여러 항목으로 나뉘어 최종 문장(최대 5개)을 다 차지한다(2026-08-12 실측).
+        self._scan_wall_min_cm: Optional[float] = None
+        self._scan_wall_elapsed: float = 0.0
 
     def start(self) -> None:
         """모든 컴포넌트와 워커 스레드를 시작한다.
@@ -479,11 +514,11 @@ class RasEyesApp:
 
         if self._use_hw:
             try:
-                self._button_handler = ButtonHandler()
-                self._button_handler.start(self._toggle_mute)
+                self._power_button_handler = PowerButtonHandler()
+                self._power_button_handler.start(self._on_scan_trigger)
             except RuntimeError as exc:
-                logger.warning("ButtonHandler 초기화 실패 (gpiod 미설치?): %s", exc)
-                self._button_handler = None
+                logger.warning("PowerButtonHandler 초기화 실패 (evdev 미설치?): %s", exc)
+                self._power_button_handler = None
 
         mode = "Mock" if self._use_mock else "YoloDetector"
         logger.info("RasEyes 시작 (%s 모드, 병렬 스레드)", mode)
@@ -514,14 +549,53 @@ class RasEyesApp:
         self._v_thread.start()
         self._s_thread.start()
 
-    def _toggle_mute(self) -> None:
-        """물리 버튼 누름 시 오디오 음소거 온/오프 전환."""
-        self._mute_active = not self._mute_active
-        if not self._mute_active:
-            # 음소거 중 래치된 위험 수준이 남아 있으면 해제 후 재진입 전까지
-            # 경보가 나가지 않는다. 해제 시점에 초기화해 즉시 다시 알리도록 한다.
-            self._alert_policy.reset()
-        logger.info("버튼 누름: 오디오 %s", "음소거" if self._mute_active else "음소거 해제")
+    def _on_scan_trigger(self) -> None:
+        """전원 버튼(또는 SIGUSR1) 수신 시 360° 스캔 모드를 토글한다.
+
+        한 번 누르면 시작, 스캔 중에 다시 누르면 그 자리에서 종료한다. 사람마다
+        한 바퀴 도는 속도가 달라 고정 시간이나 비전 비교로 끝을 추측하는 대신,
+        사용자가 직접 끝을 알려주는 쪽이 더 정확하고 연산도 적다(2026-08-12 결정).
+        """
+        if self._scan_active:
+            logger.info("스캔 트리거: 종료 (두 번째 누름)")
+            self._finish_scan(time.monotonic())
+            return
+        logger.info("스캔 트리거: 시작")
+        self._scan_active = True
+        self._scan_start_ts = time.monotonic()
+        self._scan_captures = []
+        self._scan_wall_min_cm = None
+        self._scan_wall_elapsed = 0.0
+        self._tts.speak(config.SCAN_MODE_ANNOUNCEMENT, RiskLevel.HIGH)
+
+    def _finish_scan(self, now: float) -> None:
+        """스캔을 종료하고 수집된 캡처로 결과 문장을 조립해 발화한다.
+
+        Args:
+            now: 종료 시각(단조 시각) — 버튼 재입력 시점 또는 SCAN_MAX_DURATION_SEC
+                안전 상한 도달 시점. 실제 회전에 걸린 시간을 방위각 환산 기준으로
+                쓴다 — 사람마다 회전 속도가 달라 고정값을 쓰면 방위각이 실제와
+                어긋난다 (config.py의 SCAN_MAX_DURATION_SEC 주석 참고).
+        """
+        actual_duration = max(now - self._scan_start_ts, 0.1)
+        objects = dedupe_captures(self._scan_captures, actual_duration)
+        if self._scan_wall_min_cm is not None:
+            direction = azimuth_direction(self._scan_wall_elapsed, actual_duration)
+            objects.append(ScannedObject("wall", self._scan_wall_min_cm, direction))
+        sentence = build_scan_sentence(objects)
+        logger.info(
+            "스캔 종료: %.1fs 소요, 캡처 %d건 → 객체 %d개 → \"%s\"",
+            actual_duration, len(self._scan_captures), len(objects), sentence,
+        )
+        self._tts.speak(sentence, RiskLevel.HIGH)
+        self._scan_active = False
+        self._scan_start_ts = None
+        self._scan_captures = []
+        self._scan_wall_min_cm = None
+        self._scan_wall_elapsed = 0.0
+        # 스캔 동안 실제 위험 상태가 어떻게 흘렀는지 알 수 없으므로, 재개 시점에
+        # 래치를 깨끗하게 리셋한다 (센서 재초기화 시 리셋하는 것과 같은 이유).
+        self._alert_policy.reset()
 
     def _on_sensor_reinit(self) -> None:
         """ToF 센서 재초기화 직후 거리 기반 상태를 모두 초기화한다.
@@ -535,8 +609,8 @@ class RasEyesApp:
     def stop(self) -> None:
         """모든 워커 스레드를 중단하고 컴포넌트를 정리한다."""
         self._stop_event.set()
-        if self._button_handler is not None:
-            self._button_handler.stop()
+        if self._power_button_handler is not None:
+            self._power_button_handler.stop()
         if self._v_thread:
             self._v_thread.join(timeout=2.0)
         if self._s_thread:
@@ -563,7 +637,12 @@ class RasEyesApp:
             logger.info("종료 신호 수신 (SIGTERM)")
             self._stop_event.set()
 
+        def _on_sigusr1(signum: int, frame: Optional[FrameType]) -> None:
+            logger.info("스캔 트리거 신호 수신 (SIGUSR1)")
+            self._on_scan_trigger()
+
         signal.signal(signal.SIGTERM, _on_sigterm)
+        signal.signal(signal.SIGUSR1, _on_sigusr1)
 
         self.start()
         try:
@@ -722,6 +801,28 @@ class RasEyesApp:
                 # 갱신되지 않으면 만료 이전의 거리가 그대로 남아 경보가 계속 나간다
                 distance_is_new = True
 
+            # 360° 스캔 모드: ToF 신규 샘플이 뜬 사이클에만 동기 캡처를 시도한다.
+            # last_vision_ts/last_distance/distance_is_new/now는 위에서 이미 계산된 값을
+            # 그대로 재사용하므로 추가 I/O가 없다. 정상 종료는 버튼 재입력
+            # (_on_scan_trigger)이 담당하고, 여기서는 사용자가 종료를 잊었을 때의
+            # 안전 상한만 본다.
+            if self._scan_active:
+                if distance_is_new:
+                    capture = try_pair_capture(
+                        self._scan_start_ts, last_vision_ts, now, last_detections,
+                        last_distance, self._vision.conf_threshold,
+                    )
+                    if capture is not None:
+                        self._scan_captures.append(capture)
+                    elif is_wall_reading(
+                        last_vision_ts, now, last_detections, last_distance, self._vision.conf_threshold,
+                    ) and (self._scan_wall_min_cm is None or last_distance < self._scan_wall_min_cm):
+                        self._scan_wall_min_cm = last_distance
+                        self._scan_wall_elapsed = last_vision_ts - self._scan_start_ts
+                if _scan_should_finalize(now, self._scan_start_ts):
+                    logger.warning("스캔: 종료 버튼 없이 안전 상한(%.0fs) 도달, 자동 종료", config.SCAN_MAX_DURATION_SEC)
+                    self._finish_scan(now)
+
             # 다이내믹 FPS: 근접 물체가 없으면 비전 워커를 저전력 모드로 전환.
             # 단 AE가 노출을 조정하는 중이면 미룬다 — 저전력 4 FPS에서는 프레임이
             # 250ms 간격으로만 들어와 수렴이 배로 느려지는데, 그 구간이 정확히
@@ -809,9 +910,12 @@ class RasEyesApp:
             # 위험 '상태'를 경보 '이벤트'로 변환 — 진입/승격 시 1회, 지속 시 리마인더만.
             # 시스템 경고는 장애물 경보가 아니므로 정책을 우회한다.
             decision = self._alert_policy.evaluate(result.risk_level, result.distance_cm, now)
-            if decision.emit:
+            # 스캔 중에는 장애물 경보만 멈춘다 — 배터리 등 시스템 경고는 정책을 우회하므로
+            # pending_system은 그대로 통과시킨다.
+            obstacle_alert_allowed = decision.emit and not self._scan_active
+            if obstacle_alert_allowed:
                 _alerts_emitted += 1
-            alert_gate_open = decision.emit or pending_system is not None
+            alert_gate_open = obstacle_alert_allowed or pending_system is not None
 
             _total_cycles += 1
             if result.tof_only_mode:
@@ -835,7 +939,6 @@ class RasEyesApp:
             should_play_beep = (
                 alert_gate_open
                 and self._beep.should_beep(effective_risk)
-                and not self._mute_active
                 and not tts_speaking
             )
             if should_play_beep:
@@ -843,7 +946,7 @@ class RasEyesApp:
 
             # TTS: 탐지 결과 기반 음성 알림 (비프음과 독립적으로 논블로킹 동작)
             tts_phrase = _build_tts_text(result)
-            if decision.emit and tts_phrase and not self._mute_active:
+            if obstacle_alert_allowed and tts_phrase:
                 self._tts.speak(tts_phrase, result.risk_level)
                 _last_tts_text = tts_phrase
 
@@ -867,8 +970,7 @@ class RasEyesApp:
                         config.CAMERA_OCCLUSION_FRAMES,
                         config.CAMERA_OCCLUSION_CHANGE_THRESH,
                     )
-                    if not self._mute_active:
-                        self._audio.play_occlusion_alert()
+                    self._audio.play_occlusion_alert()
                     _last_occlusion_alert_time = now
                     _occlusion_alert_count += 1
 

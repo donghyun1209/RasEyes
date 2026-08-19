@@ -104,8 +104,32 @@ class AutoWhiteBalance:
         clamped = np.clip(blended, config.CSI_AWB_GAIN_MIN, config.CSI_AWB_GAIN_MAX)
         self._set_clamped(bool(np.any(clamped != blended)))
         self._gains = clamped.astype(np.float32)
-        ramp = np.arange(256, dtype=np.float32)[:, None] * self._gains[None, :]
-        self._lut = np.clip(ramp, 0, 255).astype(np.uint8).reshape(256, 1, 3)
+        self._lut = self._build_lut(self._gains)
+
+    def _build_lut(self, gains: np.ndarray) -> np.ndarray:
+        """채널 게인으로 룩업 테이블(256×1×3)을 만든다.
+
+        ⚠️ 값에 게인을 곱하고 그대로 클리핑하면, 게인이 큰 채널(예: R)이 다른
+        채널보다 먼저 255에서 클리핑돼 원래 무채색이던 밝은 픽셀이 마젠타로
+        치우친다 (2026-08-04 야외 실측 — 흰색이 마젠타로 뜨는 버그). 측광
+        (_measure)은 이미 클리핑 픽셀을 제외하므로 문제는 여기, 적용부에 있다.
+
+        CSI_AWB_HIGHLIGHT_ROLLOFF_START 미만은 풀 게인(그린 캐스트 보정은 대부분
+        이 대역에서 일어나므로 기존 동작과 동일), 그 위로는 255까지 게인을 선형으로
+        1.0까지 낮춰 모든 채널이 255에서 함께 만나게 한다.
+
+        Args:
+            gains: (B, G, R) 채널 게인.
+
+        Returns:
+            shape (256, 1, 3) uint8 LUT, cv2.LUT에 바로 쓸 수 있는 형태.
+        """
+        idx = np.arange(256, dtype=np.float32)
+        start = float(config.CSI_AWB_HIGHLIGHT_ROLLOFF_START)
+        rolloff = np.clip((255.0 - idx) / (255.0 - start), 0.0, 1.0)
+        eased_gains = 1.0 + (gains[None, :] - 1.0) * rolloff[:, None]
+        ramp = idx[:, None] * eased_gains
+        return np.clip(ramp, 0, 255).astype(np.uint8).reshape(256, 1, 3)
 
     def _set_clamped(self, clamped: bool) -> None:
         """클램프 상태를 갱신하고 전이 시에만 로깅한다.

@@ -3,6 +3,7 @@
 하드웨어 없이 합성 프레임으로 검증한다. 시간 의존 로직은 now를 인자로 주입하므로
 sleep 없이 갱신 주기를 재현한다 (CLAUDE.md §4).
 """
+import cv2
 import numpy as np
 
 import config
@@ -162,6 +163,45 @@ def test_output_dtype_and_shape_are_unchanged():
 
     assert out.dtype == np.uint8
     assert out.shape == frame.shape
+
+
+def test_near_white_highlights_are_not_pushed_into_magenta():
+    """게인이 큰 채널(R)이 하이라이트에서 다른 채널보다 먼저 클리핑돼 무채색이
+    마젠타로 치우치면 안 된다 (Phase 3-2, 2026-08-04 실측 "흰색이 마젠타로" 버그).
+
+    고칠 곳은 측광이 아니라 적용부(LUT)다 — _measure는 이미 클리핑 픽셀을
+    제외하고 있었다.
+    """
+    awb = AutoWhiteBalance()
+    # 실측 근사 게인 (B, G, R) — R이 크게 보정돼야 하는 그린 캐스트 조건
+    awb._gains = np.array([1.05, 0.77, 1.34], dtype=np.float32)
+    awb._lut = awb._build_lut(awb._gains)
+
+    # 거의 무채색인, 클리핑 직전의 밝은 픽셀
+    near_white = np.array([[[230, 235, 230]]], dtype=np.uint8)
+    corrected = cv2.LUT(near_white, awb._lut)[0, 0]
+    b, g, r = float(corrected[0]), float(corrected[1]), float(corrected[2])
+
+    assert r < 255, f"R 채널이 클리핑되어 정보가 소실됐습니다: {corrected}"
+    assert abs(r / g - 1.0) < 0.1, f"하이라이트에서 R/G가 마젠타로 치우쳤습니다: {r/g:.3f} (R={r:.0f} G={g:.0f})"
+    assert abs(b / g - 1.0) < 0.1, f"하이라이트에서 B/G가 마젠타로 치우쳤습니다: {b/g:.3f} (B={b:.0f} G={g:.0f})"
+
+
+def test_midtone_gain_is_unaffected_by_highlight_rolloff():
+    """롤오프 시작점 미만의 값은 기존과 동일하게 풀 게인이 적용된다 (회귀 방지).
+
+    그린 캐스트 보정(test_green_cast_is_corrected_toward_neutral)이 실측하는
+    대역이 대부분 여기라, 하이라이트 롤오프가 이 대역까지 침범하면 원래
+    보정 기능 자체가 약해진다.
+    """
+    gains = np.array([1.05, 0.77, 1.34], dtype=np.float32)
+    lut = AutoWhiteBalance()._build_lut(gains)
+    idx = config.CSI_AWB_HIGHLIGHT_ROLLOFF_START - 1
+    for c in range(3):
+        expected = min(255, int(idx * float(gains[c])))  # astype(uint8)은 반올림이 아니라 절삭
+        assert int(lut[idx, 0, c]) == expected, (
+            f"채널 {c}: 롤오프 시작점 미만에서 게인이 풀로 적용되지 않았습니다"
+        )
 
 
 def test_disabled_by_config_is_respected_by_camera_hal(monkeypatch):

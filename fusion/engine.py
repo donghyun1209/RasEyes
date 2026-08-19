@@ -77,6 +77,8 @@ class FusionEngine:
         min_confidence: Optional[float] = None,
         vision_blind: bool = False,
         distance_is_new: bool = True,
+        mid_risk_dist_cm: Optional[float] = None,
+        suppress_mid_when_no_detection: bool = True,
     ) -> FusionResult:
         """탐지 결과와 ToF 거리로 위험 수준을 평가한다.
 
@@ -93,11 +95,20 @@ class FusionEngine:
                 ToF 폴링(~4.8Hz)보다 빨라 같은 값을 3번씩 넣으면 window=3 버퍼가 동일
                 샘플로 채워져 평활 효과가 사라지고, OoR 소프트 리셋도 물리 측정 1회
                 만에 트리거된다. 기본값 True는 "호출 1회 = 샘플 1개"인 테스트 관점이다.
+            mid_risk_dist_cm: MID 판정 상한 거리(cm). None이면 config.MID_RISK_DIST_CM(150) 사용.
+                둘러보기 모드가 사거리를 넓히기 위해(예: 350cm) 주입하는 이음매다.
+                보행 모드는 항상 None(기본값)으로 호출해 임계값을 손대지 않는다
+                (docs/2.1_ROADMAP.md §2-E ②).
+            suppress_mid_when_no_detection: True면 "비전 정상 + 탐지 0개"일 때 MID를
+                억제하고 mid_suppressed로만 센다(보행 모드 기본 동작, CLAUDE.md §3).
+                False면 그 상태를 그대로 MID로 보고한다 — 둘러보기 모드는 COCO에 없는
+                "벽" 후보를 라벨 없이 MID/HIGH로 알려야 하므로 억제를 끈다.
 
         Returns:
             FusionResult 인스턴스.
         """
         effective_min_conf = min_confidence if min_confidence is not None else config.MIN_CONFIDENCE
+        mid_dist = config.MID_RISK_DIST_CM if mid_risk_dist_cm is None else mid_risk_dist_cm
 
         # 신규 물리 샘플일 때만 필터·OoR 카운터를 전진시킨다. 첫 호출은 비교할
         # 직전 값이 없으므로 무조건 반영한다.
@@ -117,7 +128,7 @@ class FusionEngine:
 
         # 비전 신뢰 불가 — 객체 확인이 불가능하므로 거리만으로 판단한다 (안전망)
         if vision_blind:
-            risk = self._tof_only_risk(filtered_dist)
+            risk = self._tof_only_risk(filtered_dist, mid_dist)
             return FusionResult(risk, filtered_dist, tof_only_mode=True)
 
         valid = [d for d in detections if d.confidence >= effective_min_conf]
@@ -127,10 +138,15 @@ class FusionEngine:
         if not valid:
             if filtered_dist <= config.HIGH_RISK_DIST_CM:
                 return FusionResult(RiskLevel.HIGH, filtered_dist, tof_only_mode=False)
-            return FusionResult(
-                RiskLevel.NONE, filtered_dist, tof_only_mode=False,
-                mid_suppressed=filtered_dist <= config.MID_RISK_DIST_CM,
-            )
+            within_mid = filtered_dist <= mid_dist
+            if suppress_mid_when_no_detection:
+                return FusionResult(
+                    RiskLevel.NONE, filtered_dist, tof_only_mode=False,
+                    mid_suppressed=within_mid,
+                )
+            if within_mid:
+                return FusionResult(RiskLevel.MID, filtered_dist, tof_only_mode=False)
+            return FusionResult(RiskLevel.NONE, filtered_dist, tof_only_mode=False)
 
         best = max(valid, key=lambda d: d.confidence)
         center_x = (best.bbox[0] + best.bbox[2]) / 2.0
@@ -147,7 +163,7 @@ class FusionEngine:
                 RiskLevel.HIGH, filtered_dist, tof_only_mode=False,
                 top_label=best.label, direction=direction,
             )
-        if filtered_dist <= config.MID_RISK_DIST_CM:
+        if filtered_dist <= mid_dist:
             return FusionResult(
                 RiskLevel.MID, filtered_dist, tof_only_mode=False,
                 top_label=best.label, direction=direction,
@@ -161,10 +177,11 @@ class FusionEngine:
         self._oor_count = 0
         self._last_filtered = None
 
-    def _tof_only_risk(self, distance_cm: float) -> RiskLevel:
+    def _tof_only_risk(self, distance_cm: float, mid_dist: Optional[float] = None) -> RiskLevel:
         """ToF 단독 모드에서 거리 기반 위험 수준을 반환한다."""
+        effective_mid = config.MID_RISK_DIST_CM if mid_dist is None else mid_dist
         if distance_cm <= config.HIGH_RISK_DIST_CM:
             return RiskLevel.HIGH
-        if distance_cm <= config.MID_RISK_DIST_CM:
+        if distance_cm <= effective_mid:
             return RiskLevel.MID
         return RiskLevel.NONE

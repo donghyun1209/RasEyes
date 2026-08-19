@@ -432,3 +432,63 @@ class TestBuildTtsText:
         )
         text = _build_tts_text(result)
         assert "83 centimeters" in text
+
+
+# ── _build_tts_text(scan_mode=True) 테스트 (2-E-7) ────────────────────────────
+# ⚠ 위 TestBuildTtsText의 케이스는 scan_mode 인자를 전혀 넘기지 않는다 — 기본값
+# False에서 한 글자도 안 바뀌었는지가 이 분기 추가의 핵심 회귀 가드다.
+
+class TestBuildTtsTextScanMode:
+    def test_HIGH여도_Danger_접두사가_없다(self) -> None:
+        """스스로 켜고 둘러보는 중이지 경고받는 중이 아니다."""
+        result = FusionResult(
+            RiskLevel.HIGH, 90.0, tof_only_mode=False,
+            top_label="chair", direction="왼쪽",
+        )
+        text = _build_tts_text(result, scan_mode=True)
+        assert text == "Found chair, 90 centimeters, on the left"
+        assert "Danger" not in text
+
+    def test_MID도_거리를_말한다(self) -> None:
+        """보행 모드 MID는 거리를 생략하지만, 둘러보기 사거리 대부분이 이 구간이다."""
+        result = FusionResult(
+            RiskLevel.MID, 220.0, tof_only_mode=False,
+            top_label="person", direction="정면",
+        )
+        text = _build_tts_text(result, scan_mode=True)
+        assert text == "Found person, 220 centimeters, ahead"
+
+    def test_라벨이_없으면_wall이라고_말한다(self) -> None:
+        """COCO에 '벽' 라벨이 없어 top_label=None을 wall로 근사한다."""
+        result = FusionResult(RiskLevel.MID, 300.0, tof_only_mode=False, top_label=None)
+        text = _build_tts_text(result, scan_mode=True)
+        assert text == "Found wall, 300 centimeters, ahead"
+
+    def test_tof_only여도_Danger_Caution이_없다(self) -> None:
+        result = FusionResult(RiskLevel.HIGH, 80.0, tof_only_mode=True)
+        text = _build_tts_text(result, scan_mode=True)
+        assert text is not None
+        assert "Danger" not in text and "Caution" not in text
+        assert "80 centimeters" in text
+
+    def test_S로_시작하는_라벨도_Found로_시작해_어두_S_삼킴을_피한다(self) -> None:
+        """계획 A의 개수-선두 보호가 사라진 자리를 파열음 고정어가 대신한다 (§2-E ④)."""
+        result = FusionResult(
+            RiskLevel.MID, 200.0, tof_only_mode=False,
+            top_label="scissors", direction="오른쪽",
+        )
+        text = _build_tts_text(result, scan_mode=True)
+        assert text.startswith("Found ")
+
+    def test_NONE이면_scan_mode에서도_None(self) -> None:
+        result = FusionResult(RiskLevel.NONE, 400.0, tof_only_mode=False)
+        assert _build_tts_text(result, scan_mode=True) is None
+
+    def test_기본값은_보행_모드와_동일하다(self) -> None:
+        """scan_mode 인자를 생략하면 기존 보행 모드 출력과 100% 같아야 한다."""
+        result = FusionResult(
+            RiskLevel.HIGH, 80.0, tof_only_mode=False,
+            top_label="person", direction="정면",
+        )
+        assert _build_tts_text(result) == _build_tts_text(result, scan_mode=False)
+        assert _build_tts_text(result) == "Danger! person, 80 centimeters, ahead"

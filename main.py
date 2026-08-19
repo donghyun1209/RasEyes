@@ -33,12 +33,10 @@ from audio.tts import EspeakTts
 from fusion.alert_policy import AlertPolicy
 from fusion.engine import FusionEngine, FusionResult, RiskLevel
 from fusion.scan import (
-    ScanCapture,
-    ScannedObject,
-    azimuth_direction,
-    build_scan_sentence,
-    dedupe_captures,
     is_wall_reading,
+    scan_can_speak_now,
+    scan_should_announce,
+    scan_target_identity,
     try_pair_capture,
 )
 from logs.clip_recorder import ClipRecorder
@@ -181,22 +179,41 @@ def _find_audio_device() -> Optional[int]:
 _DIR_EN: dict = {"왼쪽": "on the left", "오른쪽": "on the right", "정면": "ahead"}
 
 
-def _build_tts_text(result: FusionResult) -> Optional[str]:
+def _build_tts_text(result: FusionResult, scan_mode: bool = False) -> Optional[str]:
     """FusionResult에서 TTS 발화 텍스트를 생성한다 (영어).
+
+    이 함수는 보행 경보와 둘러보기 모드가 함께 쓴다 — scan_mode는 기존 출력을
+    바꾸는 게 아니라 분기를 추가하는 것이다. scan_mode=False(기본값)의 출력은
+    2-E-7 이전과 한 글자도 달라지지 않는다 (회귀 방지, docs/2.1_ROADMAP.md §2-E).
+
+    둘러보기 모드는 세 가지가 보행 모드와 다르다: ① 사용자가 스스로 켜고 둘러보는
+    중이지 경고받는 중이 아니므로 "Danger!"가 붙지 않는다 ② 사거리 대부분이
+    MID 구간이라 거리를 항상 말한다 ③ 라벨이 없는 "탐지 0개 + ToF 유효" 상태를
+    COCO에 없는 "wall"이라고 부른다. 문구는 어두 S 삼킴 함정(Piper)을 피하려고
+    항상 파열음 "Found"로 시작한다.
+
+    Args:
+        result: 퓨전 엔진 평가 결과.
+        scan_mode: True면 둘러보기 모드용 문구를 생성한다.
 
     Returns:
         발화할 문자열. NONE 위험 수준이면 None.
     """
     if result.risk_level == RiskLevel.NONE:
         return None
-    if result.tof_only_mode:
-        if result.risk_level == RiskLevel.HIGH:
-            return "Danger! Obstacle ahead"
-        return "Caution, obstacle"
-    label = result.top_label or "obstacle"
+    dist = round(result.distance_cm)
     direction_en = _DIR_EN.get(result.direction or "정면", "ahead")
+    if result.tof_only_mode:
+        if not scan_mode:
+            if result.risk_level == RiskLevel.HIGH:
+                return "Danger! Obstacle ahead"
+            return "Caution, obstacle"
+        return f"Found something, {dist} centimeters, {direction_en}"
+    if scan_mode:
+        label = result.top_label or "wall"
+        return f"Found {label}, {dist} centimeters, {direction_en}"
+    label = result.top_label or "obstacle"
     if result.risk_level == RiskLevel.HIGH:
-        dist = round(result.distance_cm)
         return f"Danger! {label}, {dist} centimeters, {direction_en}"
     return f"{label} {direction_en}"
 
@@ -487,12 +504,12 @@ class RasEyesApp:
 
         self._scan_active: bool = False
         self._scan_start_ts: Optional[float] = None
-        self._scan_captures: List[ScanCapture] = []
-        # 벽 요약 — 스캔 전체에서 가장 가까운 "탐지 0개 + ToF 유효" 값 하나만 남긴다.
-        # dedupe_captures처럼 인스턴스로 쪼개면 회전 중 탐지가 끊겼다 이어지며 같은
-        # 벽이 여러 항목으로 나뉘어 최종 문장(최대 5개)을 다 차지한다(2026-08-12 실측).
-        self._scan_wall_min_cm: Optional[float] = None
-        self._scan_wall_elapsed: float = 0.0
+        # 마지막으로 실제 발화에 성공한 대표 대상 식별자 (2-E-3 발화 게이트).
+        self._scan_last_target: Optional[str] = None
+        # 버튼 스레드/SIGUSR1 핸들러는 이 플래그만 세운다 — _scan_active 등 상태는
+        # 메인 루프 스레드만 만져서 락 없이 동시성 문제를 없앤다 (2-A-3, 아래
+        # _request_scan_trigger/_consume_scan_trigger 참고).
+        self._scan_trigger_requested = threading.Event()
 
     def start(self) -> None:
         """모든 컴포넌트와 워커 스레드를 시작한다.
@@ -515,7 +532,7 @@ class RasEyesApp:
         if self._use_hw:
             try:
                 self._power_button_handler = PowerButtonHandler()
-                self._power_button_handler.start(self._on_scan_trigger)
+                self._power_button_handler.start(self._request_scan_trigger)
             except RuntimeError as exc:
                 logger.warning("PowerButtonHandler 초기화 실패 (evdev 미설치?): %s", exc)
                 self._power_button_handler = None
@@ -549,12 +566,37 @@ class RasEyesApp:
         self._v_thread.start()
         self._s_thread.start()
 
+    def _request_scan_trigger(self) -> None:
+        """전원 버튼 스레드에서 호출된다 — 상태를 직접 만지지 않고 플래그만 세운다.
+
+        ⚠️ 이 메서드가 _scan_active/_scan_start_ts를 직접 만지면 안 된다. 버튼은
+        자신만의 스레드(power-button-handler)에서 콜백을 실행하는데, 그 스레드가
+        메인 루프와 락 없이 같은 필드를 주고받으면 스캔 종료가 메인 루프의 스캔
+        처리 중간에 끼어드는 경합이 생긴다 — 실제로 _scan_start_ts가 None이 된
+        직후 메인 루프가 그 값을 참조해 TypeError로 프로세스가 죽는 경로가 있었다
+        (2026-08-16 발견, docs/2.1_ROADMAP.md §2-A). 상태를 만지는 스레드를 메인
+        루프 하나로 좁히면(_consume_scan_trigger) 락이 필요 없어진다.
+        """
+        self._scan_trigger_requested.set()
+
+    def _consume_scan_trigger(self) -> None:
+        """메인 루프 스레드에서만 트리거 요청을 소비해 스캔 상태를 전이시킨다.
+
+        버튼 콜백·SIGUSR1 핸들러가 세운 플래그를 메인 루프가 매 사이클 확인한다.
+        상태(_scan_active 등)를 만지는 유일한 스레드가 되어 락 없이 안전하다.
+        """
+        if self._scan_trigger_requested.is_set():
+            self._scan_trigger_requested.clear()
+            self._on_scan_trigger()
+
     def _on_scan_trigger(self) -> None:
-        """전원 버튼(또는 SIGUSR1) 수신 시 360° 스캔 모드를 토글한다.
+        """360° 둘러보기 모드를 토글한다. 메인 루프 스레드에서만 호출해야 한다.
 
         한 번 누르면 시작, 스캔 중에 다시 누르면 그 자리에서 종료한다. 사람마다
-        한 바퀴 도는 속도가 달라 고정 시간이나 비전 비교로 끝을 추측하는 대신,
-        사용자가 직접 끝을 알려주는 쪽이 더 정확하고 연산도 적다(2026-08-12 결정).
+        한 바퀴 도는 속도가 달라 고정 시간으로 끝을 추측하는 대신, 사용자가 직접
+        끝을 알려주는 쪽이 더 정확하다(2026-08-12 결정). 켜져 있는 동안의 안내는
+        실시간 경보 경로가 대상이 바뀔 때마다 담당한다(_run_loop의 스캔 발화 블록,
+        2-E) — 이 메서드는 상태 전이와 시작/종료 안내만 맡는다.
         """
         if self._scan_active:
             logger.info("스캔 트리거: 종료 (두 번째 누름)")
@@ -563,36 +605,23 @@ class RasEyesApp:
         logger.info("스캔 트리거: 시작")
         self._scan_active = True
         self._scan_start_ts = time.monotonic()
-        self._scan_captures = []
-        self._scan_wall_min_cm = None
-        self._scan_wall_elapsed = 0.0
+        self._scan_last_target = None
         self._tts.speak(config.SCAN_MODE_ANNOUNCEMENT, RiskLevel.HIGH)
 
     def _finish_scan(self, now: float) -> None:
-        """스캔을 종료하고 수집된 캡처로 결과 문장을 조립해 발화한다.
+        """스캔을 종료하고 상태를 초기화한다.
+
+        누적·요약이 없으므로(2-E) 여기서 발화할 결과 문장이 없다 — 실시간 경보
+        경로가 스캔 동안 이미 마주친 대상을 그때그때 말했다.
 
         Args:
             now: 종료 시각(단조 시각) — 버튼 재입력 시점 또는 SCAN_MAX_DURATION_SEC
-                안전 상한 도달 시점. 실제 회전에 걸린 시간을 방위각 환산 기준으로
-                쓴다 — 사람마다 회전 속도가 달라 고정값을 쓰면 방위각이 실제와
-                어긋난다 (config.py의 SCAN_MAX_DURATION_SEC 주석 참고).
+                안전 상한 도달 시점.
         """
-        actual_duration = max(now - self._scan_start_ts, 0.1)
-        objects = dedupe_captures(self._scan_captures, actual_duration)
-        if self._scan_wall_min_cm is not None:
-            direction = azimuth_direction(self._scan_wall_elapsed, actual_duration)
-            objects.append(ScannedObject("wall", self._scan_wall_min_cm, direction))
-        sentence = build_scan_sentence(objects)
-        logger.info(
-            "스캔 종료: %.1fs 소요, 캡처 %d건 → 객체 %d개 → \"%s\"",
-            actual_duration, len(self._scan_captures), len(objects), sentence,
-        )
-        self._tts.speak(sentence, RiskLevel.HIGH)
+        logger.info("스캔 종료: %.1fs 소요", max(now - self._scan_start_ts, 0.0))
         self._scan_active = False
         self._scan_start_ts = None
-        self._scan_captures = []
-        self._scan_wall_min_cm = None
-        self._scan_wall_elapsed = 0.0
+        self._scan_last_target = None
         # 스캔 동안 실제 위험 상태가 어떻게 흘렀는지 알 수 없으므로, 재개 시점에
         # 래치를 깨끗하게 리셋한다 (센서 재초기화 시 리셋하는 것과 같은 이유).
         self._alert_policy.reset()
@@ -638,8 +667,11 @@ class RasEyesApp:
             self._stop_event.set()
 
         def _on_sigusr1(signum: int, frame: Optional[FrameType]) -> None:
+            # 시그널 핸들러 안에서 상태를 직접 만지거나 tts.speak()를 부르면
+            # 메인 루프 처리 중간에 재진입하는 위험이 있다 — 플래그만 세운다
+            # (_request_scan_trigger와 같은 원칙, 2-A-3).
             logger.info("스캔 트리거 신호 수신 (SIGUSR1)")
-            self._on_scan_trigger()
+            self._scan_trigger_requested.set()
 
         signal.signal(signal.SIGTERM, _on_sigterm)
         signal.signal(signal.SIGUSR1, _on_sigusr1)
@@ -711,6 +743,9 @@ class RasEyesApp:
 
         while not self._stop_event.is_set():
             loop_start = time.monotonic()
+            # 버튼/SIGUSR1이 세운 스캔 트리거 요청을 메인 루프 스레드에서만 소비한다
+            # (2-A-3 동시성 가드 — _request_scan_trigger 문서 참고).
+            self._consume_scan_trigger()
 
             # 실측 FPS 계산 (EMA 적용)
             iter_time = loop_start - prev_loop_start
@@ -801,28 +836,6 @@ class RasEyesApp:
                 # 갱신되지 않으면 만료 이전의 거리가 그대로 남아 경보가 계속 나간다
                 distance_is_new = True
 
-            # 360° 스캔 모드: ToF 신규 샘플이 뜬 사이클에만 동기 캡처를 시도한다.
-            # last_vision_ts/last_distance/distance_is_new/now는 위에서 이미 계산된 값을
-            # 그대로 재사용하므로 추가 I/O가 없다. 정상 종료는 버튼 재입력
-            # (_on_scan_trigger)이 담당하고, 여기서는 사용자가 종료를 잊었을 때의
-            # 안전 상한만 본다.
-            if self._scan_active:
-                if distance_is_new:
-                    capture = try_pair_capture(
-                        self._scan_start_ts, last_vision_ts, now, last_detections,
-                        last_distance, self._vision.conf_threshold,
-                    )
-                    if capture is not None:
-                        self._scan_captures.append(capture)
-                    elif is_wall_reading(
-                        last_vision_ts, now, last_detections, last_distance, self._vision.conf_threshold,
-                    ) and (self._scan_wall_min_cm is None or last_distance < self._scan_wall_min_cm):
-                        self._scan_wall_min_cm = last_distance
-                        self._scan_wall_elapsed = last_vision_ts - self._scan_start_ts
-                if _scan_should_finalize(now, self._scan_start_ts):
-                    logger.warning("스캔: 종료 버튼 없이 안전 상한(%.0fs) 도달, 자동 종료", config.SCAN_MAX_DURATION_SEC)
-                    self._finish_scan(now)
-
             # 다이내믹 FPS: 근접 물체가 없으면 비전 워커를 저전력 모드로 전환.
             # 단 AE가 노출을 조정하는 중이면 미룬다 — 저전력 4 FPS에서는 프레임이
             # 250ms 간격으로만 들어와 수렴이 배로 느려지는데, 그 구간이 정확히
@@ -891,13 +904,68 @@ class RasEyesApp:
             )
             vision_unreliable = vision_blind or fps_fallback_active or vision_stalled
 
+            # 둘러보기 모드는 회전 중이라 오래된 프레임의 탐지를 그대로 쓰면 이미
+            # 지나친 방향의 라벨을 지금 방향인 것처럼 말하게 된다 — 신선하지 않으면
+            # 이번 사이클은 "탐지 없음"으로 취급한다 (2-E-5, 신선도 게이트).
+            # ToF 필터는 raw_distance_cm/distance_is_new로만 전진하므로 여기서
+            # detections만 골라도 필터 상태에는 영향이 없다.
+            if self._scan_active:
+                detections_for_result = (
+                    last_detections if try_pair_capture(last_vision_ts, now) else []
+                )
+            else:
+                detections_for_result = last_detections
+
             result = self._fusion.evaluate(
-                last_detections,
+                detections_for_result,
                 last_distance,
                 min_confidence=self._vision.conf_threshold,
                 vision_blind=vision_unreliable,
                 distance_is_new=distance_is_new,
+                mid_risk_dist_cm=config.SCAN_MAX_RANGE_CM if self._scan_active else None,
+                suppress_mid_when_no_detection=not self._scan_active,
             )
+
+            # TTS 발화 상태 조회 — 스캔 발화 게이트·비프음 suppress·NPU 스로틀링
+            # 이벤트에 공용 사용 (한 사이클에 한 번만 조회).
+            tts_speaking = self._tts.is_speaking()
+            if tts_speaking != self._tts_active_event.is_set():
+                if tts_speaking:
+                    self._tts_active_event.set()
+                else:
+                    self._tts_active_event.clear()
+
+            # 둘러보기 모드 실시간 발화 (2-E) — 실시간 경보 경로(FusionEngine)를 그대로
+            # 재사용하되, 위험 '상태'가 아니라 '대표 대상이 바뀌는 순간'에만 말한다.
+            # 보행 모드의 obstacle_alert_allowed/AlertPolicy 경로와는 완전히 분리된
+            # 별도 게이트다 — 스캔 중에는 그 경로가 이미 차단돼 있다(아래 참고).
+            if self._scan_active:
+                if result.tof_only_mode:
+                    scan_target = "tof_only" if result.risk_level != RiskLevel.NONE else None
+                else:
+                    wall_confirmed = (
+                        result.top_label is None
+                        and result.risk_level != RiskLevel.NONE
+                        and is_wall_reading(
+                            last_vision_ts, now, last_detections, last_distance,
+                            self._vision.conf_threshold,
+                        )
+                    )
+                    scan_target = scan_target_identity(
+                        result.risk_level != RiskLevel.NONE, result.top_label, wall_confirmed,
+                    )
+                if scan_should_announce(scan_target, self._scan_last_target):
+                    if scan_can_speak_now(result.risk_level == RiskLevel.HIGH, tts_speaking):
+                        scan_phrase = _build_tts_text(result, scan_mode=True)
+                        if scan_phrase:
+                            self._tts.speak(scan_phrase, result.risk_level)
+                            self._scan_last_target = scan_target
+                if _scan_should_finalize(now, self._scan_start_ts):
+                    logger.warning(
+                        "스캔: 종료 버튼 없이 안전 상한(%.0fs) 도달, 자동 종료",
+                        config.SCAN_MAX_DURATION_SEC,
+                    )
+                    self._finish_scan(now)
 
             # 시스템 경고(배터리 등)와 퓨전 결과를 병합해 단일 오디오 채널로 직렬화
             pending_system = self._beep.pop_system_alert()
@@ -924,14 +992,6 @@ class RasEyesApp:
                 _no_detect_cycles += 1
             if result.mid_suppressed:
                 _mid_suppressed += 1
-
-            # TTS 발화 상태 1회 조회 — 비프음 suppress 및 NPU 스로틀링 이벤트에 공용 사용
-            tts_speaking = self._tts.is_speaking()
-            if tts_speaking != self._tts_active_event.is_set():
-                if tts_speaking:
-                    self._tts_active_event.set()
-                else:
-                    self._tts_active_event.clear()
 
             # TTS 발화 중에는 비프음을 suppresse — 두 aplay가 겹쳐 들리는 것을 방지.
             # 게이트가 닫혀 있으면 should_beep()을 호출하지 않는다 — 쿨다운 타이머가

@@ -282,6 +282,13 @@ CSI_AWB_BRIGHT_THRESH: int = 240
 CSI_AWB_MIN_VALID_RATIO: float = 0.10          # 유효 픽셀이 이보다 적으면 게인을 갱신하지 않는다
 CSI_AWB_METER_WIDTH: int = 160                 # 측광용 다운샘플링 너비
 CSI_AWB_METER_HEIGHT: int = 120                # 측광용 다운샘플링 높이
+# 하이라이트 클리핑 비대칭 방지 (Phase 3-2, 2026-08-04 실측 "흰색이 마젠타로" 버그).
+# 게인이 큰 채널(R 등)을 밝은 값에 그대로 곱하면 다른 채널보다 먼저 255에서 클리핑돼
+# 원래 무채색이던 밝은 픽셀이 마젠타로 치우친다. 이 값 미만은 풀 게인(기존 동작과 동일 —
+# 그린 캐스트 보정은 대부분 이 대역에서 일어난다), 이 값부터 255까지는 게인을 선형으로
+# 1.0까지 낮춰 모든 채널이 255에서 함께 만나게 한다. 고칠 곳은 측광(_measure)이
+# 아니라 적용부(LUT)다 — 측광은 이미 클리핑 픽셀을 제외하고 있다.
+CSI_AWB_HIGHLIGHT_ROLLOFF_START: int = 128
 
 # === v2.0 Phase 5-2 — 비전 신뢰 불가(vision_blind) 판정 ===
 # "탐지 0개"와 "카메라 실명"을 구분한다. 예전에는 max_conf < MIN_CONFIDENCE 하나로
@@ -303,28 +310,25 @@ VISION_BLIND_HYSTERESIS_LUMA: float = 15.0
 # 핸들러가 살아있는 동안 물리 전원 버튼은 오직 스캔 트리거로만 동작한다.
 POWER_BUTTON_DEVICE_NAME: str = "rk805 pwrkey"
 
-# === v2.1 Phase 2-B/2-C — 360° 스캔 파이프라인 (동기 캡처·중복 제거·문장 조립) ===
+# === v2.1 Phase 2-E — 둘러보기 모드 (실시간 경보 경로 재사용) ===
 # 스캔 종료는 고정 시간도 비전 비교도 아니라 **버튼 재입력**이다(2026-08-12 결정).
 # 사람마다 한 바퀴 도는 속도가 달라 고정 30초로는 실제로 다 돌고도 한참 더 기다렸고,
 # 시작 화면과의 비전 비교(델타 임계값)로 바꿔봤지만 실측 없이 튜닝해야 하는 값이라
 # 신뢰도가 불확실했다. 사용자가 직접 끝을 알리는 쪽이 더 정확하고 연산도 적다.
-# 방위각도 실제 종료 시점의 경과시간을 분모로 쓰므로, 고정시간 가정에서 생기던
-# "회전이 빨리 끝나면 뒤/왼쪽이 나올 수 없는" 문제가 함께 풀린다.
 SCAN_MAX_DURATION_SEC: float = 45.0            # 사용자가 종료 버튼을 잊었을 때의 안전 상한
-# "turn around"가 아니라 "turn to your right"인 이유: 방위각을 시간만으로 추정하는
-# 방법 B(IMU 없음)는 회전 방향을 모르면 "오른쪽"/"왼쪽"이 뒤바뀔 수 있다. 회전 방향을
-# 문구로 고정하면 이 위험이 사라진다. "Please"/"Press"가 강한 파열음으로 시작해 어두
-# S 삼킴 함정도 피한다.
-#
-# ⚠️ "Please turn to your right. Scanning for N seconds." 형태로 실기 테스트했을 때
-# "Scanning"의 S가 들리지 않았다(2026-08-12) — 기존에 알려진 "어두(단어 첫머리) S
-# 삼킴"이 아니라 **마침표 뒤 새 문장이 시작되는 지점에서도 재현**된다는 뜻이다.
-# 아래 문구의 두 번째 문장도 "Press"로 시작해 이 함정을 피한다.
-SCAN_MODE_ANNOUNCEMENT: str = "Please turn to your right. Press again when you are done."
+# ⚠️ 8/14에 누적·요약·방위각 추정을 전부 폐기했다(2-E) — 두 번째 버튼 입력이
+# "지금이 정확히 360도다"라는, 시각장애인이 판단할 수 없는 것을 요구하고 있었다.
+# 방향은 이제 사용자의 몸(회전) + bbox 중심 x(실시간 경보 경로가 이미 측정하는 값)가
+# 전달하므로, 회전 방향을 문구로 고정할 이유(방위각 추정)가 사라졌다. "Please"가
+# 강한 파열음으로 시작해 어두 S 삼킴 함정을 피한다.
+SCAN_MODE_ANNOUNCEMENT: str = "Please turn around slowly. Press again when you are done."
 # ToF 물리 주기(TOF_INTER_MEASUREMENT_MS=210ms)·저전력 비전 주기(250ms)보다 여유 있게 —
-# 새 ToF 샘플과 짝지을 비전 프레임이 이 시간보다 오래됐으면 동기로 보지 않는다.
+# 둘러보기 모드에서 이 시간보다 오래된 비전 프레임은 신뢰하지 않는다. 회전 중에는
+# 정지 상태보다 프레임 신선도가 더 중요하다 — 라벨이 실제 방향과 어긋나는 것을 막는
+# 신선도 게이트 (누적은 삭제됐지만 이 게이트는 남는다, docs/2.1_ROADMAP.md §2-E ③).
 SCAN_SYNC_MAX_FRAME_AGE_SEC: float = 0.35
-# 같은 라벨을 "같은 물체"로 볼 최대 각도(회전 속도가 가변이라 초가 아니라 각도로 둔다 —
-# dedupe_captures가 호출 시점의 실제 회전 시간으로 초 단위로 환산한다).
-SCAN_AZIMUTH_CONTINUITY_DEG: float = 18.0
-SCAN_MAX_ANNOUNCE_ITEMS: int = 5               # 문장에 담을 최대 그룹 수
+# 둘러보기 모드의 사거리 상한(cm). 실시간 경보의 MID(150cm)로는 방 한가운데서 돌 때
+# 3m 벽에 대해 아무 말도 안 한다. TOF_OUT_OF_RANGE_CM(400) 아래로 둬야 허수값을
+# 거리처럼 말하지 않는다. 보행 모드 임계값(HIGH_RISK_DIST_CM/MID_RISK_DIST_CM)은
+# 그대로 둔다 — 걸을 때 넓히면 오경보가 폭발한다(CLAUDE.md §3).
+SCAN_MAX_RANGE_CM: float = 350.0

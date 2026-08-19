@@ -6,7 +6,7 @@
 * **Current Phase:** Orange Pi 5 배포 단계. PC(Linux, Python 3.13)에서 개발하고 OPi5로 배포(`raseyes.service`).
 * **Constraints:** 100% On-device, 외부 API/Cloud 사용 불가.
 * **KPIs:** End-to-End Latency < 500ms, 추론 < 60ms(15+ FPS), 탐지 Recall > 95%, 오탐지 < 1회/분.
-* **문서:** `docs/PRD.md`(요구사항), `docs/TRD.md`(기술 명세), `docs/1.0_ROADMAP.md`(v1.0 완료 기록), `docs/2.0_ROADMAP.md`(v2.0 기록), **`docs/2.1_ROADMAP.md`(현재 진행 중 — 마감 2026-09-02, 신규 부품 구매 없음)**, `docs/ToPost.md`(최신 작업 일지), `docs/checklist.md`(착용 테스트 체크리스트), `docs/equipment.txt`(장비 목록), `docs/wantToMake.md`(구현 아이디어 초안).
+* **문서:** `docs/PRD.md`(요구사항), `docs/TRD.md`(기술 명세), `docs/1.0_ROADMAP.md`(v1.0 완료 기록), `docs/2.0_ROADMAP.md`(v2.0 기록), **`docs/2.1_ROADMAP.md`(현재 진행 중 — 마감 2026-09-02, 신규 부품 구매 없음)**, **`docs/2.2_ROADMAP.md`(2.1과 병행 — 폰 앱(iOS) BLE 길안내, 마감 2026-09-14 파리 개강 전)**, `docs/ToPost.md`(최신 작업 일지), `docs/checklist.md`(착용 테스트 체크리스트), `docs/equipment.txt`(장비 목록), `docs/wantToMake.md`(구현 아이디어 초안).
 
 ## 2. Project Structure & Rules
 * `/vision`, `/sensor`, `/fusion`, `/audio`, `/logs`, `/scripts` 등 도메인별 폴더 분리. `main.py`는 오케스트레이션만 담당.

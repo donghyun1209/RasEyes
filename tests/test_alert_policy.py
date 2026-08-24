@@ -23,7 +23,13 @@ def test_진입_시_1회만_발화한다():
         assert policy.evaluate(RiskLevel.HIGH, HIGH_D, now=i * 0.1).emit is False
 
 
-def test_리마인더는_설정된_간격마다_발화한다():
+def test_리마인더는_설정된_간격마다_발화한다(monkeypatch):
+    """리마인더 간격 로직 자체를 검증한다.
+
+    운영 기본값(ALERT_REMINDER_SEC=inf, 2.1 Phase 3-1)은 리마인더를 껐지만,
+    메커니즘은 남아 있어 유한 간격으로 되돌리면 다시 동작해야 한다.
+    """
+    monkeypatch.setattr(config, "ALERT_REMINDER_SEC", 5.0)
     policy = AlertPolicy()
     policy.evaluate(RiskLevel.HIGH, HIGH_D, now=0.0)
 
@@ -36,6 +42,15 @@ def test_리마인더는_설정된_간격마다_발화한다():
 
     # 리마인더 직후 타이머가 갱신되어 다시 침묵
     assert policy.evaluate(RiskLevel.HIGH, HIGH_D, now=config.ALERT_REMINDER_SEC + 0.1).emit is False
+
+
+def test_기본값에서는_리마인더가_꺼져있다():
+    """2.1 Phase 3-1 — ALERT_REMINDER_SEC 기본값은 리마인더를 끈다."""
+    policy = AlertPolicy()
+    policy.evaluate(RiskLevel.HIGH, HIGH_D, now=0.0)
+
+    for i in range(1, 100):
+        assert policy.evaluate(RiskLevel.HIGH, HIGH_D, now=i * 60.0).emit is False
 
 
 def test_히스테리시스_미달이면_해제되지_않는다():

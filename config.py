@@ -11,7 +11,7 @@ MIN_CONFIDENCE: float = 0.4
 # 2026-07-28 야외 실측: HIGH 상태 55.8% → 비프 분당 181회.
 # 진입 시 1회만 울리고, 임계값+히스테리시스를 넘어야 해제한다.
 ALERT_HYSTERESIS_CM: float = 30.0   # 해제 여유. 실측상 20→80cm로 키워도 감소율 81%→88%로 효과 미미
-ALERT_REMINDER_SEC: float = 5.0     # 위험이 지속될 때 재알림 간격
+ALERT_REMINDER_SEC: float = float("inf")  # 위험 지속 중 재알림 끔 (2.1 Phase 3-1, 8/24) — enter/escalate만 발화
 
 # Signal Filtering
 MOVING_AVG_WINDOW: int = 3

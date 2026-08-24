@@ -1,46 +1,105 @@
-"""360° 둘러보기 모드 — 신선도 게이트, 벽 후보 판정, 발화 게이트.
+"""360° 둘러보기 모드 파이프라인 — 동기 캡처, 시간 기반 방위각 중복 제거, 문장 조립.
 
 I/O·시계 호출이 없는 순수 로직이다 (vision/auto_exposure.py와 같은 패턴). 메인 루프가
 이미 계산한 값(vision_ts, distance_is_new 등)을 그대로 받아 호출하므로 하드웨어 없이
 PC에서 검증할 수 있다.
 
-⚠️ 2026-08-14에 누적·요약·시간 기반 방위각 추정을 전부 폐기했다(docs/2.1_ROADMAP.md §2-E).
-두 번째 버튼 입력이 "지금이 정확히 360도다"라는, 시각장애인이 판단할 수 없는 것을
-요구하고 있었다. 지금은 실시간 경보 경로(fusion/engine.py)를 모드만 바꿔 재사용하고,
-방향은 사용자의 몸(회전) + bbox 중심 x(실측값)가 전달한다.
+⚠️ 2026-08-14~16에 이 누적·요약·시간 기반 방위각 추정을 "실시간으로 대상이 바뀔 때마다
+말하는" 방식(2-E)으로 대체했었다 — 두 번째 버튼 입력이 "지금이 정확히 360도다"라는
+판단을 요구한다는 이유였다. **2026-08-22, 실사용 결과 실시간 발화 쪽이 잘 맞지 않아
+이 계획 A(누적 후 종료 시 한 번에 요약)로 되돌렸다.** 방위각이 "고정 속도로 정확히
+한 바퀴"를 가정하는 근사치라는 한계는 여전하지만(회전 속도가 불균일하면 4방향 판정이
+틀릴 수 있음), 회전 중 계속 말이 끼어드는 것보다 다 돌고 한 번에 듣는 쪽을 택했다.
 """
-from typing import List, Optional
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
 
 import config
 from vision.interface import DetectionResult
 
+# "ahead"가 스캔 시작 시점(방위각 0도)의 정면이다. SCAN_MODE_ANNOUNCEMENT가 오른쪽으로
+# 돌라고 지시하므로, 방위각이 증가할수록 원래 오른쪽 → 뒤 → 왼쪽 순으로 마주친다.
+_DIR_PHRASE: Dict[str, str] = {
+    "ahead": "ahead",
+    "right": "on the right",
+    "behind": "behind you",
+    "left": "on the left",
+}
+_PLURAL_OVERRIDES: Dict[str, str] = {"person": "people"}
+
+
+@dataclass
+class ScanCapture:
+    """스캔 중 프레임·ToF를 동기 정렬해 얻은 캡처 1건.
+
+    Attributes:
+        elapsed_sec: 스캔 시작 시각(scan_start_ts) 기준 경과 시간 (초).
+        distance_cm: 이 캡처 시점의 ToF 거리 원시값 (cm, 이동평균 미적용).
+        detections: confidence로 필터링된 탐지 결과 목록.
+    """
+
+    elapsed_sec: float
+    distance_cm: float
+    detections: List[DetectionResult]
+
+
+@dataclass
+class ScannedObject:
+    """중복 제거 후 남은 물리 객체 1개.
+
+    Attributes:
+        label: COCO 영문 레이블.
+        distance_cm: 관측된 최소 거리 (가장 가까웠던 순간, 안전 우선).
+        direction: "ahead" | "right" | "behind" | "left".
+    """
+
+    label: str
+    distance_cm: float
+    direction: str
+
 
 def try_pair_capture(
+    scan_start_ts: float,
     vision_ts: Optional[float],
     now: float,
+    detections: List[DetectionResult],
+    distance_cm: float,
+    min_confidence: float,
     max_frame_age_sec: float = config.SCAN_SYNC_MAX_FRAME_AGE_SEC,
-) -> bool:
-    """이번 사이클의 비전 프레임이 발화에 쓸 만큼 신선한지 판정한다.
+) -> Optional[ScanCapture]:
+    """새 ToF 물리 샘플 시점에 맞는 비전 프레임이 있으면 캡처 1건으로 묶는다.
 
-    회전 중에는 정지 상태보다 신선도가 더 중요하다 — 오래된 프레임의 탐지를 그대로
-    발화하면 사용자가 이미 지나친 방향의 라벨을 지금 방향인 것처럼 듣게 된다
-    (부록 D "라벨 불일치", 8/6 기준 30개 중 24개 불일치로 재현됐던 문제).
+    호출자는 ToF의 신규 물리 샘플(distance_is_new=True)이 뜬 사이클에만 이 함수를
+    불러야 한다 — 그래야 "방금 들어온 거리값 + 그 순간 가장 최신 프레임"이 자연스럽게
+    짝지어진다. 이게 동기화의 핵심이며, 이전에는 큐가 비면 낡은 탐지 결과를 그대로
+    쓰던 "라벨 불일치" 문제(docs/2.1_ROADMAP.md 부록 D)를 해결한다.
 
-    누적·페어링(구 ScanCapture 생성)은 8/14에 삭제됐지만, 이 신선도 판정 자체는
-    남아야 한다 (docs/2.1_ROADMAP.md §2-E ③) — 호출자는 신선하지 않으면 이번
-    사이클의 탐지 결과를 무시해야 한다.
+    유효 탐지가 없으면 None이다 — "벽" 요약은 별도 경로(is_wall_reading)가 담당한다.
 
     Args:
+        scan_start_ts: 스캔이 시작된 단조 시각 (초).
         vision_ts: 가장 최근 비전 프레임의 캡처 시각. 아직 프레임이 없었으면 None.
         now: 현재 단조 시각 (초).
-        max_frame_age_sec: vision_ts가 이보다 오래됐으면 신선하지 않다고 본다.
+        detections: 이번 사이클의 탐지 결과 목록 (필터링 전).
+        distance_cm: 이번 사이클의 ToF 거리 원시값 (cm).
+        min_confidence: 유효 탐지로 인정할 신뢰도 하한.
+        max_frame_age_sec: vision_ts가 이보다 오래됐으면 동기로 보지 않는다.
 
     Returns:
-        신선하면 True.
+        페어링에 성공하면 ScanCapture, 아니면 None.
     """
-    if vision_ts is None:
-        return False
-    return (now - vision_ts) <= max_frame_age_sec
+    if vision_ts is None or (now - vision_ts) > max_frame_age_sec:
+        return None
+
+    valid = [d for d in detections if d.confidence >= min_confidence]
+    if not valid:
+        return None
+
+    return ScanCapture(
+        elapsed_sec=vision_ts - scan_start_ts,
+        distance_cm=distance_cm,
+        detections=valid,
+    )
 
 
 def is_wall_reading(
@@ -60,14 +119,14 @@ def is_wall_reading(
     수 있다. 정확히 벽인지는 알 수 없고(책장·문일 수도 있음) 실내 정지 스캔이라는
     상황에서의 근사치다.
 
-    호출자는 신선한 사이클(try_pair_capture)에서만 이 함수를 불러야 한다. 3m까지
-    보는 실시간 경로(engine.evaluate에 suppress_mid_when_no_detection=False로 호출)가
-    이미 "탐지 없음 + 거리 유효"를 MID/HIGH로 판정하므로, 이 함수는 그 판정이
-    "wall"이라고 불러도 되는 근거(신선하고, 실제로 탐지가 없고, OoR이 아님)를
-    한 번 더 확인하는 게이트로 쓰인다.
+    호출자는 try_pair_capture와 같은 동기 게이트(신규 ToF 샘플 + 신선한 프레임)로
+    호출해야 한다. 스캔 전체에서 **가장 가까운 값 하나만** 남겨 요약하는 용도라
+    (main.py._finish_scan 참고), dedupe_captures처럼 인스턴스를 여러 개로 쪼개지
+    않는다 — 회전 중 탐지가 끊겼다 이어지며 같은 벽이 여러 항목으로 나뉘어
+    최종 문장(최대 5개)을 다 차지하는 문제(2026-08-12 실측)를 피하기 위함이다.
 
     Args:
-        vision_ts, now, max_frame_age_sec: try_pair_capture와 동일한 신선도 게이트.
+        vision_ts, now, max_frame_age_sec: try_pair_capture와 동일한 동기화 게이트.
         detections: 이번 사이클의 탐지 결과 목록 (필터링 전).
         distance_cm: 이번 사이클의 ToF 거리 원시값 (cm).
         min_confidence: 유효 탐지로 인정할 신뢰도 하한.
@@ -82,70 +141,145 @@ def is_wall_reading(
     return distance_cm < config.TOF_OUT_OF_RANGE_CM
 
 
-def scan_target_identity(
-    has_risk: bool, top_label: Optional[str], wall_confirmed: bool
-) -> Optional[str]:
-    """이번 사이클의 "대표 대상" 식별자를 반환한다 (2-E-3 발화 게이트의 입력).
+def azimuth_direction(elapsed_sec: float, scan_duration_sec: float) -> str:
+    """경과 시간을 4방향으로 분류한다 (dedupe_captures가 쓰는 것과 같은 규칙).
 
-    ToF는 1점 센서라 한 프레임의 모든 탐지가 같은 거리값 하나를 공유하므로 "가장
-    가까운 것"으로 대표를 고를 수 없다 — 실시간 경로가 이미 하는 대로 최고 신뢰도
-    탐지(top_label)를 그대로 대표로 쓴다 (docs/2.1_ROADMAP.md §2-E 8/16 정정).
+    ScannedObject 없이 방향만 필요한 호출자(예: 벽 요약)를 위해 공개 함수로 둔다.
+    """
+    azimuth = (elapsed_sec / scan_duration_sec) * 360.0 if scan_duration_sec > 0 else 0.0
+    return _direction_for_azimuth(azimuth)
+
+
+def _direction_for_azimuth(azimuth_deg: float) -> str:
+    """방위각(0~360)을 4방향 중 하나로 분류한다."""
+    a = azimuth_deg % 360.0
+    if a >= 315.0 or a < 45.0:
+        return "ahead"
+    if a < 135.0:
+        return "right"
+    if a < 225.0:
+        return "behind"
+    return "left"
+
+
+class _Instance:
+    """dedupe_captures 내부에서만 쓰는 진행 중인 물체 추적 상태."""
+
+    __slots__ = ("label", "first_elapsed", "last_elapsed", "min_distance")
+
+    def __init__(self, label: str, elapsed_sec: float, distance_cm: float) -> None:
+        self.label = label
+        self.first_elapsed = elapsed_sec
+        self.last_elapsed = elapsed_sec
+        self.min_distance = distance_cm
+
+
+def dedupe_captures(
+    captures: List[ScanCapture], scan_duration_sec: float
+) -> List[ScannedObject]:
+    """시간 기반 방위각으로 같은 물체의 반복 탐지를 하나로 합친다 (방법 B).
+
+    캡처를 시간순으로 훑으며 라벨별로 "열린 인스턴스" 목록을 유지한다.
+
+    - 한 캡처 안에서 같은 라벨이 N개 탐지되면(같은 프레임 = 동시에 존재) 그 N개는
+      항상 서로 다른 물체로 취급한다 — 같은 시점에 공존하므로 중복일 수 없다.
+    - 캡처 간에는 elapsed_sec 간격이 연속성 임계값 이내면 같은 인스턴스를 연장한다
+      (회전하며 같은 물체를 연속 프레임에 걸쳐 본 것). 초과하면 새 인스턴스로 취급한다.
+      임계값은 SCAN_AZIMUTH_CONTINUITY_DEG(각도)를 scan_duration_sec 기준으로 초
+      단위 환산한 값이다 — 회전 속도가 스캔마다 달라 고정 초 단위로 두면 빨리 돈
+      스캔에서는 다른 물체를 하나로 합치고, 느리게 돈 스캔에서는 같은 물체를 여러
+      개로 쪼갠다.
+
+    인스턴스의 대표 거리는 관측된 최소 거리(가장 가까웠던 순간, 안전 우선), 대표
+    방위각은 (첫 관측 + 마지막 관측) / 2 시점을 scan_duration_sec 대비 비율로 환산한다.
 
     Args:
-        has_risk: 이번 사이클의 위험 수준이 NONE이 아닌지 여부.
-        top_label: FusionResult.top_label. 유효 탐지가 없으면 None.
-        wall_confirmed: is_wall_reading으로 확인된 "벽" 후보인지 여부. top_label이
-            None일 때만 의미가 있다.
+        captures: try_pair_capture로 수집된 캡처 목록 (임의 순서 가능).
+        scan_duration_sec: 이번 스캔의 실제 회전 소요 시간 (초). 방위각 환산 기준이자
+            연속성 임계값 환산 기준.
 
     Returns:
-        발화 대상 식별자. 아무것도 알릴 게 없으면 None (라벨도 없고 벽도 아님).
+        중복 제거된 ScannedObject 목록 (순서 무관).
     """
-    if not has_risk:
-        return None
-    if top_label is not None:
-        return top_label
-    return "wall" if wall_confirmed else None
+    ordered = sorted(captures, key=lambda c: c.elapsed_sec)
+    continuity_sec = (
+        (config.SCAN_AZIMUTH_CONTINUITY_DEG / 360.0) * scan_duration_sec
+        if scan_duration_sec > 0
+        else 0.0
+    )
+
+    instances: List[_Instance] = []
+    open_by_label: Dict[str, List[_Instance]] = {}
+
+    for cap in ordered:
+        counts: Dict[str, int] = {}
+        for det in cap.detections:
+            counts[det.label] = counts.get(det.label, 0) + 1
+
+        for label, count in counts.items():
+            open_list = open_by_label.setdefault(label, [])
+            available = [
+                inst
+                for inst in open_list
+                if cap.elapsed_sec - inst.last_elapsed <= continuity_sec
+            ]
+            # 가장 최근에 갱신된 것부터 재사용 — 연속성이 이어질 가능성이 가장 높다.
+            available.sort(key=lambda inst: inst.last_elapsed, reverse=True)
+            reuse = available[:count]
+            for inst in reuse:
+                inst.last_elapsed = cap.elapsed_sec
+                inst.min_distance = min(inst.min_distance, cap.distance_cm)
+
+            for _ in range(count - len(reuse)):
+                inst = _Instance(label, cap.elapsed_sec, cap.distance_cm)
+                instances.append(inst)
+                open_list.append(inst)
+
+    result: List[ScannedObject] = []
+    for inst in instances:
+        mid_elapsed = (inst.first_elapsed + inst.last_elapsed) / 2.0
+        azimuth = (mid_elapsed / scan_duration_sec) * 360.0 if scan_duration_sec > 0 else 0.0
+        result.append(
+            ScannedObject(inst.label, inst.min_distance, _direction_for_azimuth(azimuth))
+        )
+    return result
 
 
-def scan_should_announce(
-    current_target: Optional[str], last_spoken_target: Optional[str]
-) -> bool:
-    """대표 대상이 바뀐 경우에만 발화 여부를 True로 반환한다 (2-E-3 발화 게이트).
+def _pluralize(label: str, count: int) -> str:
+    if count == 1:
+        return label
+    return _PLURAL_OVERRIDES.get(label, label + "s")
 
-    시간 쿨다운이 아니라 라벨 기준이다 — 15초 남짓한 한 바퀴 동안 발화가 여러 건
-    쌓이면 나중 것은 이미 딴 데를 보고 있을 때 나와 엉뚱한 방향을 가리킨다
-    (ResidentAudioStream.play(interrupt=False)는 재생 중인 오디오 뒤에 이어붙이므로,
-    CLAUDE.md §7). 대상이 바뀔 때만 1회 말하면 새로 튜닝할 시간값이 없다.
 
-    ⚠️ 호출자는 실제로 발화(TTS 큐 투입)에 성공했을 때만 last_spoken_target을
-    갱신해야 한다. TTS가 이미 말하는 중이라 이번 사이클에 못 말했다면 last_spoken_target을
-    그대로 둬야, TTS가 자유로워졌을 때 같은 대상을 여전히 "새 대상"으로 인식해 발화한다
-    (안 그러면 "말했다"고 잘못 기록해 그 대상을 영영 발화하지 못한다).
+def build_scan_sentence(objects: List[ScannedObject]) -> str:
+    """중복 제거된 객체 목록을 발화 문장으로 조립한다 (계획 A).
+
+    (label, direction)으로 그룹핑해 같은 방향의 같은 라벨은 하나의 개수로 묶는다
+    (예: "3 chairs ahead"). 그룹 내 최소 거리 기준으로 가까운 순 정렬 후 상위
+    SCAN_MAX_ANNOUNCE_ITEMS개만 채택한다.
+
+    각 그룹 문구는 항상 개수(One~Five)로 시작하므로, TTS의 어두 S 삼킴 함정
+    (docs/2.1_ROADMAP.md §2-A, "S"로 시작하는 문구를 피해야 함)을 구조적으로 피한다.
 
     Args:
-        current_target: scan_target_identity의 이번 사이클 출력.
-        last_spoken_target: 마지막으로 실제 발화에 성공한 대상 식별자.
+        objects: dedupe_captures의 출력.
 
     Returns:
-        current_target이 있고 last_spoken_target과 다르면 True.
+        발화할 영문 문장. 빈 목록이면 "No obstacles detected."
     """
-    return current_target is not None and current_target != last_spoken_target
+    if not objects:
+        return "No obstacles detected."
 
+    groups: Dict[Tuple[str, str], List[float]] = {}
+    for obj in objects:
+        key = (obj.label, obj.direction)
+        groups.setdefault(key, []).append(obj.distance_cm)
 
-def scan_can_speak_now(is_high_risk: bool, tts_speaking: bool) -> bool:
-    """이번 사이클에 실제로 발화를 시도해도 되는지 판정한다.
+    ranked = sorted(groups.items(), key=lambda kv: min(kv[1]))
+    top = ranked[: config.SCAN_MAX_ANNOUNCE_ITEMS]
 
-    HIGH는 TTS가 내부적으로 현재 재생을 선점하므로 항상 말해도 안전하다. 그 외
-    (MID 등)는 TTS 우선순위 정책상 이미 말하는 중이면 조용히 버려지므로, 이 경우
-    scan_should_announce의 last_spoken_target을 갱신하면 안 된다 — 갱신해버리면
-    TTS가 자유로워졌을 때도 "이미 말했다"고 착각해 그 대상을 영영 발화하지 못한다
-    (docs/2.1_ROADMAP.md §2-E ①).
-
-    Args:
-        is_high_risk: 이번 사이클의 위험 수준이 HIGH인지 여부.
-        tts_speaking: TTS가 현재 합성/재생 중인지 여부.
-
-    Returns:
-        지금 발화(및 last_spoken_target 갱신)를 시도해도 되면 True.
-    """
-    return is_high_risk or not tts_speaking
+    parts = []
+    for (label, direction), distances in top:
+        count = len(distances)
+        parts.append(f"{count} {_pluralize(label, count)} {_DIR_PHRASE[direction]}")
+    return ". ".join(parts) + "."

@@ -1,17 +1,19 @@
-"""둘러보기 모드 단위 테스트 (2-E — 누적·요약·방위각을 삭제하고 실시간 경보 경로를
-모드만 바꿔 재사용한다).
+"""360° 둘러보기 모드 파이프라인 단위 테스트 (계획 A — 누적 후 종료 시 요약).
 
-fusion/scan.py는 시계 호출이 없는 순수 로직이므로 now/vision_ts를 직접 주입해
+fusion/scan.py는 시계 호출이 없는 순수 로직이므로 now/elapsed_sec을 직접 주입해
 sleep 없이 검증한다 (CLAUDE.md §4). main.py의 상태 머신은 스레드를 띄우지 않고
-RasEyesApp(use_mock=True) 인스턴스에 직접 메서드를 호출해 검증한다.
+RasEyesApp(use_mock=True) 인스턴스에 직접 메서드를 호출해 검증한다
+(tests/test_longevity.py의 사용 전례를 따름).
 """
 import config
-from fusion.engine import FusionEngine, RiskLevel
+from fusion.engine import RiskLevel
 from fusion.scan import (
+    ScanCapture,
+    ScannedObject,
+    azimuth_direction,
+    build_scan_sentence,
+    dedupe_captures,
     is_wall_reading,
-    scan_can_speak_now,
-    scan_should_announce,
-    scan_target_identity,
     try_pair_capture,
 )
 from main import RasEyesApp, _scan_should_finalize
@@ -22,30 +24,178 @@ def _det(label: str, confidence: float = 0.8) -> DetectionResult:
     return DetectionResult(label=label, confidence=confidence, bbox=(0, 0, 10, 10))
 
 
-# --- try_pair_capture (2-E-5: 신선도 게이트로 축소, 누적·페어링은 삭제) ---
+# --- try_pair_capture (2-B-2 동기 캡처) ---
 
 
-def test_신선한_프레임이면_True():
-    assert try_pair_capture(vision_ts=5.0, now=5.1) is True
+def test_신선한_프레임이면_캡처를_생성한다():
+    cap = try_pair_capture(
+        scan_start_ts=0.0, vision_ts=5.0, now=5.1,
+        detections=[_det("chair")], distance_cm=120.0, min_confidence=0.4,
+    )
+    assert cap is not None
+    assert cap.elapsed_sec == 5.0
+    assert cap.distance_cm == 120.0
+    assert [d.label for d in cap.detections] == ["chair"]
 
 
-def test_비전_프레임이_없으면_False():
-    assert try_pair_capture(vision_ts=None, now=5.0) is False
+def test_비전_프레임이_없으면_None():
+    cap = try_pair_capture(
+        scan_start_ts=0.0, vision_ts=None, now=5.0,
+        detections=[_det("chair")], distance_cm=120.0, min_confidence=0.4,
+    )
+    assert cap is None
 
 
-def test_프레임이_너무_오래됐으면_False():
-    assert try_pair_capture(
-        vision_ts=5.0, now=5.0 + config.SCAN_SYNC_MAX_FRAME_AGE_SEC + 0.01,
-    ) is False
+def test_프레임이_너무_오래됐으면_None():
+    cap = try_pair_capture(
+        scan_start_ts=0.0, vision_ts=5.0, now=5.0 + config.SCAN_SYNC_MAX_FRAME_AGE_SEC + 0.01,
+        detections=[_det("chair")], distance_cm=120.0, min_confidence=0.4,
+    )
+    assert cap is None
 
 
-def test_경계값은_신선하다():
-    assert try_pair_capture(
-        vision_ts=5.0, now=5.0 + config.SCAN_SYNC_MAX_FRAME_AGE_SEC,
-    ) is True
+def test_유효_탐지가_없으면_None():
+    cap = try_pair_capture(
+        scan_start_ts=0.0, vision_ts=5.0, now=5.0,
+        detections=[_det("chair", confidence=0.1)], distance_cm=120.0, min_confidence=0.4,
+    )
+    assert cap is None
 
 
-# --- is_wall_reading (변경 없음 — "벽" 후보 판정은 그대로 존치) ---
+def test_저신뢰도_탐지는_필터링된다():
+    cap = try_pair_capture(
+        scan_start_ts=0.0, vision_ts=5.0, now=5.0,
+        detections=[_det("chair", confidence=0.9), _det("dog", confidence=0.1)],
+        distance_cm=120.0, min_confidence=0.4,
+    )
+    assert cap is not None
+    assert [d.label for d in cap.detections] == ["chair"]
+
+
+# --- dedupe_captures (2-B-3 방법 B: 시간 기반 방위각 중복 제거) ---
+
+
+def test_연속_프레임의_같은_라벨은_하나로_합쳐진다():
+    captures = [
+        ScanCapture(elapsed_sec=0.0, distance_cm=150.0, detections=[_det("chair")]),
+        ScanCapture(elapsed_sec=0.3, distance_cm=140.0, detections=[_det("chair")]),
+        ScanCapture(elapsed_sec=0.6, distance_cm=130.0, detections=[_det("chair")]),
+    ]
+    objects = dedupe_captures(captures, scan_duration_sec=30.0)
+    assert len(objects) == 1
+    assert objects[0].label == "chair"
+    assert objects[0].distance_cm == 130.0  # 관측된 최소 거리
+
+
+def test_같은_프레임_내_동일_라벨은_절대_병합되지_않는다():
+    captures = [
+        ScanCapture(elapsed_sec=1.0, distance_cm=100.0, detections=[_det("chair"), _det("chair")]),
+    ]
+    objects = dedupe_captures(captures, scan_duration_sec=30.0)
+    assert len(objects) == 2
+
+
+def test_시간_간격이_연속성_임계값을_넘으면_별개_인스턴스():
+    scan_duration_sec = 30.0
+    continuity_sec = (config.SCAN_AZIMUTH_CONTINUITY_DEG / 360.0) * scan_duration_sec
+    gap = continuity_sec + 0.1
+    captures = [
+        ScanCapture(elapsed_sec=0.0, distance_cm=150.0, detections=[_det("chair")]),
+        ScanCapture(elapsed_sec=gap, distance_cm=150.0, detections=[_det("chair")]),
+    ]
+    objects = dedupe_captures(captures, scan_duration_sec=scan_duration_sec)
+    assert len(objects) == 2
+
+
+def test_다른_라벨은_섞이지_않는다():
+    captures = [
+        ScanCapture(elapsed_sec=0.0, distance_cm=100.0, detections=[_det("chair")]),
+        ScanCapture(elapsed_sec=0.1, distance_cm=100.0, detections=[_det("table")]),
+    ]
+    objects = dedupe_captures(captures, scan_duration_sec=30.0)
+    labels = sorted(o.label for o in objects)
+    assert labels == ["chair", "table"]
+
+
+def test_방위각_0은_ahead_방향이다():
+    captures = [ScanCapture(elapsed_sec=0.0, distance_cm=100.0, detections=[_det("chair")])]
+    objects = dedupe_captures(captures, scan_duration_sec=30.0)
+    assert objects[0].direction == "ahead"
+
+
+def test_사분의일_지점은_right_방향이다():
+    captures = [ScanCapture(elapsed_sec=7.5, distance_cm=100.0, detections=[_det("chair")])]
+    objects = dedupe_captures(captures, scan_duration_sec=30.0)
+    assert objects[0].direction == "right"
+
+
+def test_절반_지점은_behind_방향이다():
+    captures = [ScanCapture(elapsed_sec=15.0, distance_cm=100.0, detections=[_det("chair")])]
+    objects = dedupe_captures(captures, scan_duration_sec=30.0)
+    assert objects[0].direction == "behind"
+
+
+def test_사분의삼_지점은_left_방향이다():
+    captures = [ScanCapture(elapsed_sec=22.5, distance_cm=100.0, detections=[_det("chair")])]
+    objects = dedupe_captures(captures, scan_duration_sec=30.0)
+    assert objects[0].direction == "left"
+
+
+# --- build_scan_sentence (2-C 계획 A) ---
+
+
+def test_빈_목록이면_탐지_없음_문구():
+    assert build_scan_sentence([]) == "No obstacles detected."
+
+
+def test_같은_라벨_같은_방향은_개수로_묶인다():
+    objects = [
+        ScannedObject("chair", 100.0, "ahead"),
+        ScannedObject("chair", 120.0, "ahead"),
+        ScannedObject("chair", 90.0, "ahead"),
+    ]
+    sentence = build_scan_sentence(objects)
+    assert sentence == "3 chairs ahead."
+
+
+def test_같은_라벨도_방향이_다르면_따로_묶인다():
+    objects = [
+        ScannedObject("chair", 90.0, "ahead"),
+        ScannedObject("chair", 100.0, "right"),
+    ]
+    sentence = build_scan_sentence(objects)
+    # 더 가까운 쪽(ahead, 90cm)이 먼저 나온다
+    assert sentence == "1 chair ahead. 1 chair on the right."
+
+
+def test_최대_5개까지만_보고한다():
+    objects = [
+        ScannedObject(f"label{i}", float(100 + i), "ahead") for i in range(7)
+    ]
+    sentence = build_scan_sentence(objects)
+    # 문장은 최대 SCAN_MAX_ANNOUNCE_ITEMS개의 절로만 구성된다 (". "로 분리)
+    parts = [p for p in sentence.split(". ") if p]
+    assert len(parts) == config.SCAN_MAX_ANNOUNCE_ITEMS
+    # 가장 가까운(label0, 100cm) 것이 포함되고 가장 먼(label6) 것은 잘린다
+    assert "label0" in sentence
+    assert "label6" not in sentence
+
+
+def test_person은_people로_복수화된다():
+    objects = [ScannedObject("person", 80.0, "left"), ScannedObject("person", 90.0, "left")]
+    sentence = build_scan_sentence(objects)
+    assert sentence == "2 people on the left."
+
+
+def test_단수는_그대로_숫자_1로_시작한다():
+    objects = [ScannedObject("dog", 80.0, "behind")]
+    sentence = build_scan_sentence(objects)
+    assert sentence == "1 dog behind you."
+
+
+# --- is_wall_reading / azimuth_direction (2026-08-12 실측 이후 — 벽 요약을
+# dedupe_captures와 분리. 인스턴스로 쪼개면 회전 중 탐지가 끊겼다 이어지며 같은
+# 벽이 여러 항목으로 나뉘어 최종 문장(최대 5개)을 다 차지하는 문제가 있었다) ---
 
 
 def test_탐지가_있으면_wall_후보가_아니다():
@@ -77,106 +227,22 @@ def test_wall_후보도_프레임이_오래되면_False():
     ) is False
 
 
-# --- scan_target_identity (2-E-3 발화 게이트의 입력) ---
+def test_azimuth_direction은_dedupe_captures와_같은_규칙을_쓴다():
+    assert azimuth_direction(0.0, 30.0) == "ahead"
+    assert azimuth_direction(7.5, 30.0) == "right"
+    assert azimuth_direction(15.0, 30.0) == "behind"
+    assert azimuth_direction(22.5, 30.0) == "left"
 
 
-def test_위험이_없으면_대상도_없다():
-    assert scan_target_identity(has_risk=False, top_label="chair", wall_confirmed=True) is None
-
-
-def test_라벨이_있으면_라벨이_대상이다():
-    assert scan_target_identity(has_risk=True, top_label="chair", wall_confirmed=False) == "chair"
-
-
-def test_라벨_없고_벽_확인되면_wall이_대상이다():
-    assert scan_target_identity(has_risk=True, top_label=None, wall_confirmed=True) == "wall"
-
-
-def test_라벨_없고_벽도_아니면_대상이_없다():
-    assert scan_target_identity(has_risk=True, top_label=None, wall_confirmed=False) is None
-
-
-# --- scan_should_announce (2-E-3 발화 게이트) ---
-
-
-def test_대상이_바뀌면_발화한다():
-    assert scan_should_announce("chair", "table") is True
-
-
-def test_대상이_같으면_발화하지_않는다():
-    """같은 대상이 시야에 머무는 동안 발화는 1회뿐이다."""
-    assert scan_should_announce("chair", "chair") is False
-
-
-def test_대상이_없으면_발화하지_않는다():
-    assert scan_should_announce(None, "chair") is False
-
-
-def test_직전_대상이_없어도_새_대상이면_발화한다():
-    assert scan_should_announce("chair", None) is True
-
-
-# --- scan_can_speak_now (①: 게이트가 닫힌 사이클에서 last_target 오염 방지) ---
-
-
-def test_HIGH는_TTS가_말하는_중이어도_말할_수_있다():
-    assert scan_can_speak_now(is_high_risk=True, tts_speaking=True) is True
-
-
-def test_MID는_TTS가_쉬고_있어야_말할_수_있다():
-    assert scan_can_speak_now(is_high_risk=False, tts_speaking=False) is True
-
-
-def test_MID는_TTS가_말하는_중이면_말할_수_없다():
-    """이 사이클에 last_spoken_target을 갱신하면 안 되는 신호 — 갱신하면 그
-    대상을 영영 발화하지 못한다(§2-E ①)."""
-    assert scan_can_speak_now(is_high_risk=False, tts_speaking=True) is False
-
-
-# --- FusionEngine 모드별 파라미터 (2-E-4) ---
-
-
-def test_scan_mid_dist_미지정시_보행_기본값과_동일():
-    """mid_risk_dist_cm을 넘기지 않으면 기존 보행 모드 임계값(150cm)과 완전히 같다."""
-    engine = FusionEngine()
-    result = engine.evaluate([_det("chair", 0.9)], raw_distance_cm=151.0)
-    assert result.risk_level == RiskLevel.NONE
-
-
-def test_scan_mid_dist_지정시_사거리가_늘어난다():
-    engine = FusionEngine()
-    result = engine.evaluate(
-        [_det("chair", 0.9)], raw_distance_cm=300.0,
-        mid_risk_dist_cm=config.SCAN_MAX_RANGE_CM,
-    )
-    assert result.risk_level == RiskLevel.MID
-    assert result.top_label == "chair"
-
-
-def test_suppress_mid_기본값True면_탐지없음_MID는_억제된다():
-    """보행 모드 회귀 방지 — MID 억제 로직은 손대지 않는다."""
-    engine = FusionEngine()
-    result = engine.evaluate([], raw_distance_cm=120.0)
-    assert result.risk_level == RiskLevel.NONE
-    assert result.mid_suppressed is True
-
-
-def test_suppress_mid_False면_탐지없음도_MID로_보고된다():
-    """둘러보기 모드는 COCO에 없는 '벽'을 라벨 없이 MID/HIGH로 알려야 한다."""
-    engine = FusionEngine()
-    result = engine.evaluate(
-        [], raw_distance_cm=300.0,
-        mid_risk_dist_cm=config.SCAN_MAX_RANGE_CM,
-        suppress_mid_when_no_detection=False,
-    )
-    assert result.risk_level == RiskLevel.MID
-    assert result.top_label is None
-    assert result.mid_suppressed is False
-
-
-def test_scan_사거리_상한은_TOF_OUT_OF_RANGE_CM_미만이다():
-    """넓히더라도 OoR 허수값을 거리처럼 말하면 안 된다."""
-    assert config.SCAN_MAX_RANGE_CM < config.TOF_OUT_OF_RANGE_CM
+def test_벽만_있는_스캔은_main의_finish_scan을_거쳐_wall로_발화된다():
+    """RasEyesApp._finish_scan 엔드투엔드 — 물체는 없지만 벽 요약이 하나 잡힌 상황."""
+    app = RasEyesApp(use_mock=True)
+    app._on_scan_trigger()
+    app._scan_wall_min_cm = 250.0
+    app._scan_wall_elapsed = 0.0  # 정면(ahead)
+    app._finish_scan(now=app._scan_start_ts + 5.0)
+    assert app._tts.last_spoken == "1 wall ahead."
+    assert app._scan_wall_min_cm is None  # 종료 후 리셋
 
 
 # --- main.py 상태 머신 헬퍼 ---
@@ -201,26 +267,34 @@ def test_트리거는_스캔을_시작하고_안내를_발화한다():
 
 
 def test_스캔_중_재트리거는_스캔을_종료한다():
+    """버튼을 다시 누르면 그 자리에서 스캔이 끝난다 (고정 시간·비전 비교 대신 사용자가 직접 종료).
+
+    (정확한 방위각·문장은 실제 초 단위 경과에 좌우되므로, 여기서는 종료 자체와
+    상태 정리만 확인한다 — 상세 문장 조립은 test_finish_scan 계열이 검증한다.)
+    """
     app = RasEyesApp(use_mock=True)
     app._on_scan_trigger()
-    app._scan_last_target = "chair"
+    app._scan_captures.append(
+        ScanCapture(elapsed_sec=1.0, distance_cm=100.0, detections=[_det("chair")])
+    )
     app._on_scan_trigger()
     assert app._scan_active is False
-    assert app._scan_start_ts is None
-    assert app._scan_last_target is None
+    assert app._scan_captures == []
+    assert app._tts.last_spoken != config.SCAN_MODE_ANNOUNCEMENT
+    assert "chair" in app._tts.last_spoken
 
 
-def test_finish_scan은_상태를_초기화하고_요약을_발화하지_않는다():
-    """누적·요약이 삭제됐으므로(2-E) finish_scan은 결과 문장을 조립하지 않는다 —
-    실시간 경보 경로가 스캔 동안 이미 마주친 대상을 그때그때 말했다."""
+def test_finish_scan은_결과를_발화하고_상태를_초기화한다():
     app = RasEyesApp(use_mock=True)
     app._on_scan_trigger()
-    spoken_before_finish = app._tts.last_spoken
+    app._scan_captures = [
+        ScanCapture(elapsed_sec=0.0, distance_cm=90.0, detections=[_det("chair")]),
+    ]
     app._finish_scan(now=app._scan_start_ts + 5.0)
     assert app._scan_active is False
     assert app._scan_start_ts is None
-    assert app._scan_last_target is None
-    assert app._tts.last_spoken == spoken_before_finish  # finish_scan은 발화하지 않는다
+    assert app._scan_captures == []
+    assert app._tts.last_spoken == "1 chair ahead."
 
 
 def test_finish_scan은_경보_래치를_리셋한다():

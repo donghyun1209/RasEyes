@@ -615,6 +615,15 @@ class RasEyesApp:
             "스캔 종료: %.1fs 소요, 캡처 %d건 → 객체 %d개 → \"%s\"",
             actual_duration, len(self._scan_captures), len(objects), sentence,
         )
+        # SCAN_MAX_ANNOUNCE_ITEMS(5)로 잘리기 전 전체 목록 — 기준 물체가 실제로는
+        # 잡혔는데 다른 물체에 밀려 발화에서 빠졌는지 진단하기 위함 (2026-08-25).
+        logger.info(
+            "스캔 원본 객체(발화 전 전체): %s",
+            ", ".join(
+                f"{o.label}/{o.direction}/{o.distance_cm:.0f}cm"
+                for o in sorted(objects, key=lambda o: o.distance_cm)
+            ),
+        )
         self._tts.speak(sentence, RiskLevel.HIGH)
         self._scan_active = False
         self._scan_start_ts = None

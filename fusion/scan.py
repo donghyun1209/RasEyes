@@ -258,6 +258,12 @@ def build_scan_sentence(objects: List[ScannedObject]) -> str:
     (예: "3 chairs ahead"). 그룹 내 최소 거리 기준으로 가까운 순 정렬 후 상위
     SCAN_MAX_ANNOUNCE_ITEMS개만 채택한다.
 
+    ⚠️ ToF가 그 순간 유효 거리를 못 재면 TOF_OUT_OF_RANGE_CM으로 대체되므로,
+    여러 그룹이 그 값에서 동률이 되는 경우가 흔하다(2026-08-25 실내 검증).
+    동률일 때는 더 여러 번 감지된 그룹을 우선한다 — 거리를 모를 땐 "몇 번
+    잡혔는지"가 그나마 있는 신뢰도 근거다. 순수 발견 순서에만 맡기면 반복
+    관측된 진짜 기준 물체가 한 번 스친 오탐지에 밀려날 수 있다.
+
     각 그룹 문구는 항상 개수(One~Five)로 시작하므로, TTS의 어두 S 삼킴 함정
     (docs/2.1_ROADMAP.md §2-A, "S"로 시작하는 문구를 피해야 함)을 구조적으로 피한다.
 
@@ -275,7 +281,7 @@ def build_scan_sentence(objects: List[ScannedObject]) -> str:
         key = (obj.label, obj.direction)
         groups.setdefault(key, []).append(obj.distance_cm)
 
-    ranked = sorted(groups.items(), key=lambda kv: min(kv[1]))
+    ranked = sorted(groups.items(), key=lambda kv: (min(kv[1]), -len(kv[1])))
     top = ranked[: config.SCAN_MAX_ANNOUNCE_ITEMS]
 
     parts = []

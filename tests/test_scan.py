@@ -168,17 +168,34 @@ def test_같은_라벨도_방향이_다르면_따로_묶인다():
     assert sentence == "1 chair ahead. 1 chair on the right."
 
 
-def test_최대_5개까지만_보고한다():
+def test_최대_SCAN_MAX_ANNOUNCE_ITEMS개까지만_보고한다():
+    n = config.SCAN_MAX_ANNOUNCE_ITEMS + 2
     objects = [
-        ScannedObject(f"label{i}", float(100 + i), "ahead") for i in range(7)
+        ScannedObject(f"label{i}", float(100 + i), "ahead") for i in range(n)
     ]
     sentence = build_scan_sentence(objects)
     # 문장은 최대 SCAN_MAX_ANNOUNCE_ITEMS개의 절로만 구성된다 (". "로 분리)
     parts = [p for p in sentence.split(". ") if p]
     assert len(parts) == config.SCAN_MAX_ANNOUNCE_ITEMS
-    # 가장 가까운(label0, 100cm) 것이 포함되고 가장 먼(label6) 것은 잘린다
+    # 가장 가까운(label0, 100cm) 것이 포함되고 가장 먼 것들은 잘린다
     assert "label0" in sentence
-    assert "label6" not in sentence
+    assert f"label{n - 1}" not in sentence
+
+
+def test_거리를_모르는_물체는_더_많이_감지된_쪽이_우선한다():
+    """OoR(TOF_OUT_OF_RANGE_CM)로 동률일 때 발견 순서가 아니라 감지 횟수로 갈린다.
+
+    2026-08-25 실내 검증: 한 번만 스친 오탐지가 여러 번 반복 관측된 진짜
+    기준 물체보다 먼저 잡혀 5개 제한에서 기준 물체가 밀려난 사례가 있었다.
+    """
+    objects = [
+        ScannedObject("noise", config.TOF_OUT_OF_RANGE_CM, "left"),
+        ScannedObject("chair", config.TOF_OUT_OF_RANGE_CM, "left"),
+        ScannedObject("chair", config.TOF_OUT_OF_RANGE_CM, "left"),
+        ScannedObject("chair", config.TOF_OUT_OF_RANGE_CM, "left"),
+    ]
+    sentence = build_scan_sentence(objects)
+    assert sentence == "3 chairs on the left. 1 noise on the left."
 
 
 def test_person은_people로_복수화된다():

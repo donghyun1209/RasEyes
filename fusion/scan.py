@@ -19,12 +19,16 @@ from vision.interface import DetectionResult
 
 # "ahead"가 스캔 시작 시점(방위각 0도)의 정면이다. SCAN_MODE_ANNOUNCEMENT가 오른쪽으로
 # 돌라고 지시하므로, 방위각이 증가할수록 원래 오른쪽 → 뒤 → 왼쪽 순으로 마주친다.
+# 발화는 방향을 앞세워 묶으므로(build_scan_sentence) 문구는 문두에 오는 형태다.
 _DIR_PHRASE: Dict[str, str] = {
-    "ahead": "ahead",
-    "right": "on the right",
-    "behind": "behind you",
-    "left": "on the left",
+    "ahead": "Ahead",
+    "right": "On the right",
+    "behind": "Behind you",
+    "left": "On the left",
 }
+# 발화 순서도 그 마주친 순서를 그대로 따른다 — 들으면서 머릿속에 그리는 지도가 방금 한
+# 회전과 같은 방향으로 돌아야 덜 헷갈린다.
+_DIR_ORDER: Tuple[str, ...] = ("ahead", "right", "behind", "left")
 _PLURAL_OVERRIDES: Dict[str, str] = {"person": "people"}
 
 
@@ -251,12 +255,30 @@ def _pluralize(label: str, count: int) -> str:
     return _PLURAL_OVERRIDES.get(label, label + "s")
 
 
-def build_scan_sentence(objects: List[ScannedObject]) -> str:
-    """중복 제거된 객체 목록을 발화 문장으로 조립한다 (계획 A).
+def _join_items(items: List[str]) -> str:
+    """한 방향 안의 물체 문구들을 영어 나열로 잇는다 ("A, B and C")."""
+    if len(items) == 1:
+        return items[0]
+    return ", ".join(items[:-1]) + " and " + items[-1]
 
-    (label, direction)으로 그룹핑해 같은 방향의 같은 라벨은 하나의 개수로 묶는다
-    (예: "3 chairs ahead"). 그룹 내 최소 거리 기준으로 가까운 순 정렬 후 상위
-    SCAN_MAX_ANNOUNCE_ITEMS개만 채택한다.
+
+def build_scan_sentence(objects: List[ScannedObject]) -> str:
+    """중복 제거된 객체 목록을 발화 문장으로 조립한다 (계획 A, 방향 묶음).
+
+    **방향이 바깥 묶음이다.** (label, direction)으로 그룹핑한 뒤 방향별로 모아
+    한 방향을 한 문장으로 말한다 (예: "Ahead, 2 chairs and 1 tv."). 그룹을 거리순
+    으로만 늘어놓으면 같은 방향이 문장 여기저기에 흩어져("2 chairs ahead. 1 person
+    on the right. 1 tv ahead.") 듣는 사람이 방향별로 다시 조립해야 했다.
+
+    - 방향 순서는 _DIR_ORDER (앞 → 오른쪽 → 뒤 → 왼쪽) 고정 — 사용자가 몸을 돌리며
+      마주친 순서와 같다.
+    - 한 방향 안에서는 그룹 최소 거리 기준 가까운 순으로 최대
+      SCAN_MAX_ITEMS_PER_DIRECTION개까지. 상한을 전체가 아니라 방향별로 두는 이유는
+      config.SCAN_MAX_ITEMS_PER_DIRECTION 주석 참고 (물체가 몰린 한 방향이 정원을
+      독점해 다른 방향이 통째로 빠지는 것을 막는다).
+    - 아무것도 못 찾은 방향은 언급하지 않는다. "그 방향이 비었다"와 "그 방향을 스치는
+      동안 동기 캡처가 안 됐다"를 이 파이프라인은 구분할 수 없으므로, 없는 것을
+      "없다"고 단언하지 않는 쪽이 안전하다.
 
     ⚠️ ToF가 그 순간 유효 거리를 못 재면 TOF_OUT_OF_RANGE_CM으로 대체되므로,
     여러 그룹이 그 값에서 동률이 되는 경우가 흔하다(2026-08-25 실내 검증).
@@ -264,8 +286,8 @@ def build_scan_sentence(objects: List[ScannedObject]) -> str:
     잡혔는지"가 그나마 있는 신뢰도 근거다. 순수 발견 순서에만 맡기면 반복
     관측된 진짜 기준 물체가 한 번 스친 오탐지에 밀려날 수 있다.
 
-    각 그룹 문구는 항상 개수(One~Five)로 시작하므로, TTS의 어두 S 삼킴 함정
-    (docs/2.1_ROADMAP.md §2-A, "S"로 시작하는 문구를 피해야 함)을 구조적으로 피한다.
+    각 문장은 방향 문구("Ahead" / "On the right" / "Behind you" / "On the left")로
+    시작하므로, TTS의 어두 S 삼킴 함정(docs/2.1_ROADMAP.md §2-A)은 여전히 피한다.
 
     Args:
         objects: dedupe_captures의 출력.
@@ -281,11 +303,19 @@ def build_scan_sentence(objects: List[ScannedObject]) -> str:
         key = (obj.label, obj.direction)
         groups.setdefault(key, []).append(obj.distance_cm)
 
-    ranked = sorted(groups.items(), key=lambda kv: (min(kv[1]), -len(kv[1])))
-    top = ranked[: config.SCAN_MAX_ANNOUNCE_ITEMS]
+    by_direction: Dict[str, List[Tuple[str, List[float]]]] = {}
+    for (label, direction), distances in groups.items():
+        by_direction.setdefault(direction, []).append((label, distances))
 
-    parts = []
-    for (label, direction), distances in top:
-        count = len(distances)
-        parts.append(f"{count} {_pluralize(label, count)} {_DIR_PHRASE[direction]}")
+    parts: List[str] = []
+    for direction in _DIR_ORDER:
+        entries = by_direction.get(direction)
+        if not entries:
+            continue
+        entries.sort(key=lambda kv: (min(kv[1]), -len(kv[1])))
+        items = [
+            f"{len(distances)} {_pluralize(label, len(distances))}"
+            for label, distances in entries[: config.SCAN_MAX_ITEMS_PER_DIRECTION]
+        ]
+        parts.append(f"{_DIR_PHRASE[direction]}, {_join_items(items)}")
     return ". ".join(parts) + "."

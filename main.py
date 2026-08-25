@@ -615,8 +615,9 @@ class RasEyesApp:
             "스캔 종료: %.1fs 소요, 캡처 %d건 → 객체 %d개 → \"%s\"",
             actual_duration, len(self._scan_captures), len(objects), sentence,
         )
-        # SCAN_MAX_ANNOUNCE_ITEMS(5)로 잘리기 전 전체 목록 — 기준 물체가 실제로는
-        # 잡혔는데 다른 물체에 밀려 발화에서 빠졌는지 진단하기 위함 (2026-08-25).
+        # 방향별 상한(SCAN_MAX_ITEMS_PER_DIRECTION)으로 잘리기 전 전체 목록 — 기준
+        # 물체가 실제로는 잡혔는데 같은 방향의 다른 물체에 밀려 발화에서 빠졌는지
+        # 진단하기 위함 (2026-08-25).
         logger.info(
             "스캔 원본 객체(발화 전 전체): %s",
             ", ".join(

@@ -141,7 +141,7 @@ def test_사분의삼_지점은_left_방향이다():
     assert objects[0].direction == "left"
 
 
-# --- build_scan_sentence (2-C 계획 A, 2026-08-25 방향 묶음) ---
+# --- build_scan_sentence (2-C 계획 A, 2026-08-25 방향 묶음 + 거리 발화) ---
 
 
 def test_빈_목록이면_탐지_없음_문구():
@@ -155,7 +155,8 @@ def test_같은_라벨_같은_방향은_개수로_묶인다():
         ScannedObject("chair", 90.0, "ahead"),
     ]
     sentence = build_scan_sentence(objects)
-    assert sentence == "Ahead, 3 chairs."
+    # 그룹 거리는 최소 거리(90cm) — 가장 가까웠던 것 기준(안전 우선)
+    assert sentence == "Ahead, 3 chairs at 0.9 meters."
 
 
 def test_같은_방향의_다른_라벨은_한_문장에_몰아서_말한다():
@@ -167,21 +168,24 @@ def test_같은_방향의_다른_라벨은_한_문장에_몰아서_말한다():
         ScannedObject("person", 68.0, "right"),
     ]
     sentence = build_scan_sentence(objects)
-    # ahead가 두 문장으로 쪼개지지 않고, 방향 안에서는 가까운 라벨(chair 95cm)이 먼저다
-    assert sentence == "Ahead, 2 chairs and 1 tv. On the right, 1 person."
+    assert sentence == (
+        "Ahead, 2 chairs at 0.9 meters and 1 tv at 1.3 meters. "
+        "On the right, 1 person at 0.7 meters."
+    )
 
 
 def test_방향은_돈_순서로_말한다():
     """앞 → 오른쪽 → 뒤 → 왼쪽. 가장 가까운 물체가 어디 있든 이 순서는 고정이다."""
     objects = [
-        ScannedObject("a", 400.0, "ahead"),
+        ScannedObject("a", 380.0, "ahead"),
         ScannedObject("b", 300.0, "right"),
         ScannedObject("c", 200.0, "behind"),
         ScannedObject("d", 100.0, "left"),  # 제일 가깝지만 마지막에 말한다
     ]
     sentence = build_scan_sentence(objects)
     assert sentence == (
-        "Ahead, 1 a. On the right, 1 b. Behind you, 1 c. On the left, 1 d."
+        "Ahead, 1 a at 3.8 meters. On the right, 1 b at 3 meters. "
+        "Behind you, 1 c at 2 meters. On the left, 1 d at 1 meter."
     )
 
 
@@ -191,18 +195,21 @@ def test_아무것도_없는_방향은_언급하지_않는다():
         ScannedObject("person", 80.0, "left"),
     ]
     sentence = build_scan_sentence(objects)
-    assert sentence == "Behind you, 1 wall. On the left, 1 person."
+    assert sentence == "Behind you, 1 wall at 1.2 meters. On the left, 1 person at 0.8 meters."
     assert "Ahead" not in sentence
     assert "On the right" not in sentence
 
 
 def test_방향당_최대_개수까지만_말한다():
     n = config.SCAN_MAX_ITEMS_PER_DIRECTION + 2
-    objects = [ScannedObject(f"label{i}", float(100 + i), "ahead") for i in range(n)]
+    objects = [
+        ScannedObject(f"label{i}", float(100 + i * 50), "ahead") for i in range(n)
+    ]
     sentence = build_scan_sentence(objects)
     # 가장 가까운(label0, 100cm) 것이 남고 가장 먼 것은 잘린다
     assert "label0" in sentence
     assert f"label{n - 1}" not in sentence
+    # 항목 구분 콤마 수 + 1 = 항목 수 (거리 문구에는 콤마가 없다)
     assert sentence.count(",") + 1 == config.SCAN_MAX_ITEMS_PER_DIRECTION
 
 
@@ -217,11 +224,52 @@ def test_한_방향이_넘쳐도_다른_방향이_밀려나지_않는다():
     ]
     objects.append(ScannedObject("chair", 300.0, "left"))
     sentence = build_scan_sentence(objects)
-    assert sentence.endswith("On the left, 1 chair.")
+    assert sentence.endswith("On the left, 1 chair at 3 meters.")
+
+
+def test_거리를_못_잰_물체는_거리를_말하지_않는다():
+    """OoR(TOF_OUT_OF_RANGE_CM)은 측정값이 아니라 대체값이다.
+
+    2026-08-25 Pi 실기 스캔에서 tv·dog가 실제로 400cm로 잡혔다. 이걸 "4 meters"로
+    말하면 재지도 못한 거리를 지어내는 것이라, 거리를 빼고 물체만 말한다.
+    """
+    objects = [
+        ScannedObject("tv", config.TOF_OUT_OF_RANGE_CM, "left"),
+        ScannedObject("dog", config.TOF_OUT_OF_RANGE_CM, "left"),
+    ]
+    sentence = build_scan_sentence(objects)
+    assert sentence == "On the left, 1 tv and 1 dog."
+    assert "meter" not in sentence
+
+
+def test_한_방향에_거리를_아는_것과_모르는_것이_섞일_수_있다():
+    objects = [
+        ScannedObject("wall", 109.0, "behind"),
+        ScannedObject("chair", config.TOF_OUT_OF_RANGE_CM, "behind"),
+    ]
+    sentence = build_scan_sentence(objects)
+    assert sentence == "Behind you, 1 wall at 1.1 meters and 1 chair."
+
+
+def test_상한을_넘는_고장값도_거리를_말하지_않는다():
+    """센서가 꼬여 65535mm를 뱉는 경우(§3 상한 게이트)도 OoR과 같이 다룬다."""
+    objects = [ScannedObject("wall", 6553.5, "ahead")]
+    assert build_scan_sentence(objects) == "Ahead, 1 wall."
+
+
+def test_정확히_1미터는_단수로_읽는다():
+    objects = [ScannedObject("dog", 100.0, "behind")]
+    assert build_scan_sentence(objects) == "Behind you, 1 dog at 1 meter."
+
+
+def test_정수_미터는_소수점_없이_읽는다():
+    """"2.0 meters"처럼 TTS가 어색하게 읽을 표기를 만들지 않는다."""
+    objects = [ScannedObject("dog", 200.0, "behind")]
+    assert build_scan_sentence(objects) == "Behind you, 1 dog at 2 meters."
 
 
 def test_거리를_모르는_물체는_더_많이_감지된_쪽이_우선한다():
-    """OoR(TOF_OUT_OF_RANGE_CM)로 동률일 때 발견 순서가 아니라 감지 횟수로 갈린다.
+    """OoR로 동률일 때 발견 순서가 아니라 감지 횟수로 갈린다.
 
     2026-08-25 실내 검증: 한 번만 스친 오탐지가 여러 번 반복 관측된 진짜
     기준 물체보다 먼저 잡혀 제한에 걸린 기준 물체가 밀려난 사례가 있었다.
@@ -239,7 +287,7 @@ def test_거리를_모르는_물체는_더_많이_감지된_쪽이_우선한다(
 def test_person은_people로_복수화된다():
     objects = [ScannedObject("person", 80.0, "left"), ScannedObject("person", 90.0, "left")]
     sentence = build_scan_sentence(objects)
-    assert sentence == "On the left, 2 people."
+    assert sentence == "On the left, 2 people at 0.8 meters."
 
 
 def test_모든_문장은_방향_문구로_시작한다():
@@ -303,7 +351,7 @@ def test_벽만_있는_스캔은_main의_finish_scan을_거쳐_wall로_발화된
     app._scan_wall_min_cm = 250.0
     app._scan_wall_elapsed = 0.0  # 정면(ahead)
     app._finish_scan(now=app._scan_start_ts + 5.0)
-    assert app._tts.last_spoken == "Ahead, 1 wall."
+    assert app._tts.last_spoken == "Ahead, 1 wall at 2.5 meters."
     assert app._scan_wall_min_cm is None  # 종료 후 리셋
 
 
@@ -356,7 +404,7 @@ def test_finish_scan은_결과를_발화하고_상태를_초기화한다():
     assert app._scan_active is False
     assert app._scan_start_ts is None
     assert app._scan_captures == []
-    assert app._tts.last_spoken == "Ahead, 1 chair."
+    assert app._tts.last_spoken == "Ahead, 1 chair at 0.9 meters."
 
 
 def test_finish_scan은_경보_래치를_리셋한다():

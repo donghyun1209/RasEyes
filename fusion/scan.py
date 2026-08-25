@@ -255,6 +255,29 @@ def _pluralize(label: str, count: int) -> str:
     return _PLURAL_OVERRIDES.get(label, label + "s")
 
 
+def _format_distance(distance_cm: float) -> Optional[str]:
+    """거리(cm)를 발화용 미터 문구로 바꾼다. 측정 실패면 None.
+
+    ⚠️ **TOF_OUT_OF_RANGE_CM 이상은 측정값이 아니라 대체값이다.**
+    VL53L1XHAL은 RangeStatus가 무효인 측정(표적 없음 허수값·통신 이상)을 그 상수로
+    치환한다(§3). 그걸 "4 meters"라고 말하면 재지도 못한 거리를 지어내는 셈이라,
+    거리를 빼고 물체만 말한다 — 2026-08-25 실기 로그에서 실제로 tv·dog가 400cm로
+    잡혔다. 없는 정보를 말하지 않는 쪽이 잘못된 거리감을 주는 쪽보다 안전하다.
+
+    Args:
+        distance_cm: ScannedObject.distance_cm (그룹이면 최소 거리).
+
+    Returns:
+        "1.1 meters" / "1 meter" 같은 문구. 측정 실패면 None.
+    """
+    if distance_cm >= config.TOF_OUT_OF_RANGE_CM:
+        return None
+    meters = round(distance_cm / 100.0, 1)
+    # 정수로 떨어지면 소수점을 떼어 "2.0 meters" 대신 "2 meters"로 읽게 한다.
+    text = f"{meters:g}"
+    return f"{text} meter" if meters == 1 else f"{text} meters"
+
+
 def _join_items(items: List[str]) -> str:
     """한 방향 안의 물체 문구들을 영어 나열로 잇는다 ("A, B and C")."""
     if len(items) == 1:
@@ -279,6 +302,10 @@ def build_scan_sentence(objects: List[ScannedObject]) -> str:
     - 아무것도 못 찾은 방향은 언급하지 않는다. "그 방향이 비었다"와 "그 방향을 스치는
       동안 동기 캡처가 안 됐다"를 이 파이프라인은 구분할 수 없으므로, 없는 것을
       "없다"고 단언하지 않는 쪽이 안전하다.
+    - 각 그룹에 거리를 붙인다 ("1 wall at 1.1 meters"). 그룹의 거리는 **최소 거리**,
+      즉 그 라벨 중 가장 가까웠던 것이다 — 여러 개가 묶인 그룹("2 chairs at 1 meter")
+      에서 나머지가 더 멀 수 있지만, 안전 우선 원칙(dedupe_captures와 동일)을 따른다.
+      거리를 못 잰 그룹은 거리 없이 물체만 말한다 (_format_distance 참고).
 
     ⚠️ ToF가 그 순간 유효 거리를 못 재면 TOF_OUT_OF_RANGE_CM으로 대체되므로,
     여러 그룹이 그 값에서 동률이 되는 경우가 흔하다(2026-08-25 실내 검증).
@@ -313,9 +340,11 @@ def build_scan_sentence(objects: List[ScannedObject]) -> str:
         if not entries:
             continue
         entries.sort(key=lambda kv: (min(kv[1]), -len(kv[1])))
-        items = [
-            f"{len(distances)} {_pluralize(label, len(distances))}"
-            for label, distances in entries[: config.SCAN_MAX_ITEMS_PER_DIRECTION]
-        ]
+        items = []
+        for label, distances in entries[: config.SCAN_MAX_ITEMS_PER_DIRECTION]:
+            count = len(distances)
+            phrase = f"{count} {_pluralize(label, count)}"
+            distance_text = _format_distance(min(distances))
+            items.append(f"{phrase} at {distance_text}" if distance_text else phrase)
         parts.append(f"{_DIR_PHRASE[direction]}, {_join_items(items)}")
     return ". ".join(parts) + "."

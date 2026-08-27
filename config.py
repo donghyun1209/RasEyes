@@ -64,6 +64,13 @@ VISION_STALL_THRESHOLD_SEC: float = 2.0
 # Dynamic FPS (보조배터리 전력 절감 — 근접 물체 없을 때 비전 추론 FPS 저하)
 DYNAMIC_FPS_NO_OBSTACLE_DIST_CM: float = 200.0  # 이 거리 초과 시 저전력 모드 진입
 DYNAMIC_FPS_LOW_POWER_FPS: int = 4              # 저전력 모드 목표 FPS (3~5 FPS 범위)
+# 진입선(200cm)과 해제선(MID_RISK_DIST_CM=150cm)의 히스테리시스만으로는 부족하다.
+# RangeStatus 게이트가 무효 측정을 OoR 대체값(400cm)으로 바꾸면서 거리가 400 ↔ 유효
+# 측정을 오가 완충 밴드를 건너뛴다 (2026-08-27 실측: 진입 51회/해제 50회, 11.9분).
+# 진입에만 연속 프레임을 요구한다 — 해제까지 걸면 저전력 중 한 사이클이 250ms라
+# 근접 물체 반응이 2초 늦는다. 8사이클은 15 FPS 기준 약 533ms로, 실측된 진동
+# 주기(빈 구간 0.3~1초)의 짧은 쪽을 걸러내면서 트인 공간의 정상 진입은 통과시킨다.
+DYNAMIC_FPS_ENTER_DEBOUNCE_FRAMES: int = 8
 
 # TTS 합성 중 NPU 동시 부하 완화 (CPU 피크 분산)
 TTS_ACTIVE_VISION_FPS: int = 8                  # TTS 발화 중 비전 추론 목표 FPS

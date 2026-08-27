@@ -306,6 +306,67 @@ def _update_luma_blind(
     return blind, streak
 
 
+def _should_low_power(
+    distance_cm: float,
+    ae_settled: bool,
+    scan_active: bool,
+    active: bool,
+    streak: int,
+) -> Tuple[bool, int]:
+    """근접 물체가 없어 비전 워커를 저전력(4 FPS)으로 낮출지 판단한다.
+
+    진입선(DYNAMIC_FPS_NO_OBSTACLE_DIST_CM=200cm)과 해제선
+    (MID_RISK_DIST_CM=150cm)이 달라 히스테리시스 밴드가 이미 있지만,
+    **RangeStatus 게이트 도입 이후 그 밴드가 무력해졌다.** 게이트가 무효 측정을
+    OoR 대체값(TOF_OUT_OF_RANGE_CM=400cm)으로 바꾸므로 거리는 400과 유효 측정을
+    오갈 뿐 150~200cm 구간에 들어오는 일이 드물다 — 2026-08-27 야외 실측에서
+    진입 51회/해제 50회(11.9분, 분당 4.3회)가 기록됐고 해제 시 거리는 23~137cm로
+    전부 밴드 아래였다. 그래서 `_update_luma_blind`·`_should_fps_fallback`과 같은
+    **연속 프레임 디바운스**를 한 겹 더 건다.
+
+    ⚠️ **디바운스는 진입에만 건다.** 저전력 중에는 메인 루프도
+    DYNAMIC_FPS_LOW_POWER_FPS(4)로 내려가 한 사이클이 250ms다. 해제까지 N 사이클을
+    요구하면 근접 물체 반응이 그만큼(8사이클=2초) 늦어져 안전을 깎는다. 물체가
+    잡히면 즉시 복귀한다.
+
+    ⚠️ **스캔 중에는 저전력을 끈다** (진입 차단 + 활성이면 즉시 해제). 4 FPS에서는
+    비전 프레임 간격이 DATA_STALENESS_THRESHOLD_SEC(0.5초)를 넘어(2026-08-27 실측
+    0.53초) `탐지 결과 초기화`가 연속 발생하고, 그러면 ToF와 짝지을 탐지가 없어
+    회전 중 스치는 방향이 통째로 누락된다 — 8/25부터 원인 미상이던 둘러보기 발화
+    누락 ③이 이것이었다. 같은 날 3회 실행에서 비전 만료 11회였던 회차만 캡처가
+    2건이었고(나머지 두 회차는 만료 0회·캡처 8건) 그 회차만 뒤·왼쪽을 빠뜨렸다.
+    스캔은 10초 남짓이라 전력 영향은 무시할 수 있다.
+
+    Args:
+        distance_cm: 필터링된 ToF 거리 (cm).
+        ae_settled: AE가 수렴했는지 여부. 미수렴 중에는 진입을 미룬다.
+        scan_active: 360° 스캔 진행 중 여부.
+        active: 현재 저전력 모드 상태.
+        streak: 진입 관측이 연속으로 나온 횟수.
+
+    Returns:
+        (갱신된 저전력 상태, 갱신된 연속 카운터).
+    """
+    if scan_active:
+        return False, 0
+
+    if active:
+        return (distance_cm > config.MID_RISK_DIST_CM), 0
+
+    # AE 수렴 중에는 진입을 미룬다 — 4 FPS에서는 프레임이 250ms 간격으로만 들어와
+    # 수렴이 배로 느려지는데, 그 구간이 정확히 그늘→직사광 전환처럼 AE가 가장
+    # 급한 순간이다.
+    if not ae_settled:
+        return False, 0
+
+    if distance_cm <= config.DYNAMIC_FPS_NO_OBSTACLE_DIST_CM:
+        return False, 0
+    streak += 1
+    if streak >= config.DYNAMIC_FPS_ENTER_DEBOUNCE_FRAMES:
+        return True, 0
+    return False, streak
+
+
 def _scan_should_finalize(now: float, scan_start_ts: float) -> bool:
     """스캔 시작 후 SCAN_MAX_DURATION_SEC(안전 상한)가 지났는지 판정한다.
 
@@ -714,6 +775,7 @@ class RasEyesApp:
         prev_vision_ts: Optional[float] = None
         fps_fallback_active: bool = False
         _fps_fallback_streak: int = 0
+        _low_power_streak: int = 0
 
         last_log_time = time.monotonic()
         frame_interval = 1.0 / config.TARGET_FPS
@@ -868,26 +930,33 @@ class RasEyesApp:
                     self._finish_scan(now)
 
             # 다이내믹 FPS: 근접 물체가 없으면 비전 워커를 저전력 모드로 전환.
-            # 단 AE가 노출을 조정하는 중이면 미룬다 — 저전력 4 FPS에서는 프레임이
-            # 250ms 간격으로만 들어와 수렴이 배로 느려지는데, 그 구간이 정확히
-            # 그늘→직사광 전환처럼 AE가 가장 급한 순간이다.
-            if (
-                last_distance > config.DYNAMIC_FPS_NO_OBSTACLE_DIST_CM
-                and self._vision.ae_settled
-            ):
-                if not self._low_power_event.is_set():
-                    logger.info(
-                        "전방 %.0fcm 이내 물체 없음, 저전력 모드 진입 (%d FPS)",
-                        config.DYNAMIC_FPS_NO_OBSTACLE_DIST_CM,
-                        config.DYNAMIC_FPS_LOW_POWER_FPS,
-                    )
-                    self._low_power_event.set()
-            elif last_distance <= config.MID_RISK_DIST_CM and self._low_power_event.is_set():
+            # 판정은 _should_low_power가 담당한다 (AE 게이트·스캔 차단·디바운스).
+            prev_low_power = self._low_power_event.is_set()
+            next_low_power, _low_power_streak = _should_low_power(
+                last_distance,
+                self._vision.ae_settled,
+                self._scan_active,
+                prev_low_power,
+                _low_power_streak,
+            )
+            if next_low_power and not prev_low_power:
                 logger.info(
-                    "물체 근접 감지 (%.0fcm), 저전력 모드 해제 (%d FPS)",
-                    last_distance,
-                    config.TARGET_FPS,
+                    "전방 %.0fcm 이내 물체 없음, 저전력 모드 진입 (%d FPS)",
+                    config.DYNAMIC_FPS_NO_OBSTACLE_DIST_CM,
+                    config.DYNAMIC_FPS_LOW_POWER_FPS,
                 )
+                self._low_power_event.set()
+            elif prev_low_power and not next_low_power:
+                if self._scan_active:
+                    logger.info(
+                        "스캔 진행 중, 저전력 모드 해제 (%d FPS)", config.TARGET_FPS
+                    )
+                else:
+                    logger.info(
+                        "물체 근접 감지 (%.0fcm), 저전력 모드 해제 (%d FPS)",
+                        last_distance,
+                        config.TARGET_FPS,
+                    )
                 self._low_power_event.clear()
 
             # 비전 워커 Watchdog 체크

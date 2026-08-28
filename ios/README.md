@@ -1,8 +1,8 @@
 # RasEyesNav — iOS 길안내 앱 (2.2 로드맵 Phase 1)
 
 폰에서 목적지를 검색해 도보 턴바이턴 경로를 뽑고, 이후 Phase 2에서 그 지시를
-Pi로 전송한다. 이 폴더의 `Sources/`는 **Xcode 프로젝트가 아니라 소스 파일 모음**이다
-— `.xcodeproj`는 맥에서 생성한 뒤 이 파일들을 넣는다.
+Pi로 전송한다. **Xcode 프로젝트는 이미 생성되어 커밋되어 있다** — 맥에서는 아래
+"남은 할 일"만 하면 빌드된다.
 
 ## 왜 MapKit + TMAP 조합인가
 
@@ -21,45 +21,64 @@ Pi로 전송한다. 이 폴더의 `Sources/`는 **Xcode 프로젝트가 아니�
 파리 출국 전에 `ORSRouteProvider`를 추가하고 좌표로 제공자를 고르면 된다.
 화면·통신 계층은 프로토콜만 보므로 수정이 필요 없다.
 
-## 맥에서 할 일 (최초 1회, 약 10분)
-
-### 1. Xcode 프로젝트 생성
+## 폴더 구조
 
 ```
-Xcode → File → New → Project → iOS → App
-  Product Name : RasEyesNav
-  Interface    : SwiftUI
-  Language     : Swift
-  저장 위치     : <repo>/ios/
+ios/
+├── README.md
+└── RasEyesApp/
+    ├── RasEyesApp.xcodeproj/       Xcode 프로젝트
+    ├── Secrets.example.swift       ← 키 템플릿 (빌드 제외)
+    └── RasEyesApp/                 ← 빌드 대상 폴더
+        ├── RasEyesNavApp.swift     앱 진입점
+        ├── ContentView.swift       지도 · 검색 · 경로 지시 목록
+        ├── LocationManager.swift   CoreLocation 권한 · 좌표
+        ├── RouteProvider.swift     제공자 프로토콜 + 정규화 모델
+        ├── TmapRouteProvider.swift TMAP GeoJSON 호출 · 파싱
+        ├── Assets.xcassets/
+        └── Secrets.swift           ← 여기에 만든다 (gitignore)
 ```
 
-`ios/RasEyesNav/` 가 새로 생긴다 (`Sources/`와 별개다).
+⚠️ 이 프로젝트는 Xcode 16의 **폴더 동기화 방식**이다
+(`PBXFileSystemSynchronizedRootGroup`). `RasEyesApp/RasEyesApp/` 안의 `.swift`는
+프로젝트 네비게이터에 드래그하지 않아도 **자동으로 빌드에 포함**된다. 결과가 둘이다:
 
-### 2. 소스 파일 교체
+* **새 파일은 그 폴더에 넣기만 하면 된다** (Phase 2 통신 파일도 마찬가지).
+* **키 템플릿을 그 폴더에 두면 안 된다.** `Secrets.example.swift`와 `Secrets.swift`가
+  같은 `enum Secrets`를 선언하므로 `Invalid redeclaration of 'Secrets'`로 빌드가
+  깨진다. 그래서 템플릿만 한 단계 위에 둔다 (2026-08-28에 이 상태였던 것을 고쳤다).
 
-1. Xcode가 자동 생성한 `ContentView.swift`, `RasEyesNavApp.swift`를 **Move to Trash**
-2. `ios/Sources/`의 `.swift` 5개를 Xcode 프로젝트 네비게이터로 **드래그**
-   (`Copy items if needed` 체크, `Secrets.example.swift`는 제외)
-3. `Secrets.example.swift`를 `Secrets.swift`로 복사해 프로젝트에 추가하고 키를 채운다
-   (`Secrets.swift`는 `.gitignore`에 등록되어 커밋되지 않는다)
+## 맥에서 남은 할 일
 
-### 3. 위치 권한 문구 추가
+### 1. 위치 권한 문구 추가 ⚠️ 필수
 
+아직 들어가 있지 않다. **이게 없으면 권한 요청 팝업이 뜨지 않고 위치가 영영 `nil`이다.**
+
+```
 타겟 → Info 탭 → 항목 추가:
-
-```
 Privacy - Location When In Use Usage Description
   → 도보 경로를 안내하기 위해 현재 위치를 사용합니다.
 ```
 
-이게 없으면 권한 요청 팝업이 뜨지 않고 위치가 영영 `nil`이다.
-
-### 4. TMAP 앱 키 발급 (결제 수단 등록 불필요)
+### 2. TMAP 앱 키 발급 (결제 수단 등록 불필요)
 
 1. SK open API 포털(`openapi.sk.com`) 가입 — 포털 주소가 바뀌었을 수 있으니
    안 열리면 "TMAP 보행자 경로안내 API"로 검색
 2. 앱 등록 → **보행자 경로안내** API 추가
-3. 발급된 앱 키를 `Secrets.swift`의 `tmapAppKey`에 붙여넣기
+3. `Secrets.example.swift`를 **`RasEyesApp/RasEyesApp/Secrets.swift`로 복사**하고
+   발급된 앱 키를 `tmapAppKey`에 붙여넣기 (폴더 동기화라 별도 추가 조작은 없다)
+
+> `Secrets.swift`는 `.gitignore`(`ios/**/Secrets.swift`)에 등록되어 커밋되지 않는다.
+
+### 참고: 손대지 않아도 되는 것
+
+* **배포 타겟은 `IPHONEOS_DEPLOYMENT_TARGET = 26.5` 그대로 둔다.** 실기로 쓸
+  아이폰이 그보다 높아 설치에 문제가 없다 (2026-08-28 확인). 낮출 이유가 생기면
+  타겟 → General → Minimum Deployments에서 내리면 되고, 소스가 쓰는 가장 최신
+  API가 iOS 17의 `MapCameraPosition`·`UserAnnotation`이라 17.0까지 내려간다.
+* `SWIFT_VERSION = 5.0` — Swift 6 동시성 경고(`CLLocationManagerDelegate`가
+  `@Published`를 갱신하는 지점)는 발생하지 않는다.
+* 소스 파일 추가 — 폴더 동기화라 드래그가 필요 없다.
 
 ## 동작 확인
 
@@ -91,6 +110,15 @@ Pi로 실제 전송할 문자열이다. 배지가 **주황색(`?|…`)이면 매
 * 지도에 경로선(폴리라인)을 그리지 않는다. `LineString` 좌표를 버리고 있으므로
   필요해지면 `TmapResponse.Geometry`에서 살린다.
 * 백그라운드 위치 추적(로드맵 Phase 2-4)은 아직 붙이지 않았다.
+
+## Phase 2에서 추가할 것 (BLE 확정 — 2026-08-28)
+
+Pi에 온보드 블루투스가 없어 USB 동글을 도입하기로 했다 (Phase 0 결과, `docs/2.2_ROADMAP.md`).
+전송은 **BLE GATT**이므로 앱에 다음이 더 필요하다.
+
+* `Privacy - Bluetooth Always Usage Description` (Info)
+* Background Modes → **Uses Bluetooth LE accessories** + **Location updates**
+  (주머니에 넣고 화면을 꺼도 전송이 이어져야 한다)
 
 ## Pi 배포와의 관계
 

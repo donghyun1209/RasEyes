@@ -61,3 +61,8 @@ KakaoTalk_Photo_2026-05-20-20-48-09.png
 
 howToUse.md
 
+
+# iOS 앱 (2.2 로드맵)
+ios/**/Secrets.swift
+ios/**/xcuserdata/
+ios/**/DerivedData/

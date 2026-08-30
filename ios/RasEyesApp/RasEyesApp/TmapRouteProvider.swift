@@ -118,13 +118,19 @@ struct TmapRouteProvider: RouteProvider {
 
     /// TMAP `turnType` 코드를 공통 `ManeuverCode`로 옮긴다.
     ///
-    /// ⚠️ 이 표는 TMAP 공식 문서로 재확인이 필요하다(README 참고). 확신이 없는
-    /// 코드는 `.unknown`으로 떨어뜨리고 원문(`rawDescription`)을 화면에 남겨,
-    /// 실측에서 어떤 코드가 실제로 오는지 보고 채워 넣는다. 모르는 코드를
-    /// 임의로 "직진"에 몰아넣으면 회전을 놓치고도 조용히 지나간다.
+    /// 코드표는 SK open API 공식 문서(경로안내 샘플예제)로 검증했다 — 2026-08-30.
+    /// https://tmap-skopenapi.readme.io/reference/경로안내-샘플예제
+    ///
+    /// 그 과정에서 오류 세 건을 바로잡았다: `128`은 에스컬레이터가 아니라 **경사로**이고,
+    /// 엘리베이터로 적어 두었던 `130`은 **표에 없는 코드**이며, 실제 엘리베이터는 `218`인데
+    /// 매핑에서 빠져 있었다. 시각장애인에게 경사로를 에스컬레이터로 안내하면 틀린 정보다.
+    ///
+    /// 표에 없는 코드는 계속 `.unknown`으로 떨어뜨리고 원문(`rawDescription`)을 화면에
+    /// 남긴다. 모르는 코드를 임의로 "직진"에 몰아넣으면 회전을 놓치고도 조용히 지나간다.
     private static func maneuver(forTurnType turnType: Int?) -> ManeuverCode {
         switch turnType {
-        case 11: return .straight
+        // 회전
+        case 11, 233: return .straight  // 233 = 직진 임시
         case 12: return .left
         case 13: return .right
         case 14: return .uTurn
@@ -132,14 +138,31 @@ struct TmapRouteProvider: RouteProvider {
         case 17: return .slightLeft    // 10시 방향
         case 18: return .slightRight   // 2시 방향
         case 19: return .sharpRight    // 4시 방향
-        case 125: return .overpass     // 육교
-        case 126: return .underpass    // 지하보도
-        case 127: return .stairs
-        case 128: return .escalator
-        case 130: return .elevator
+
+        // 시설물
+        case 125: return .overpass      // 육교
+        case 126: return .underpass     // 지하보도
+        case 127: return .stairs        // 계단 진입
+        case 128: return .ramp          // 경사로 진입
+        case 129: return .stairsAndRamp // 계단+경사로 진입
+        case 218: return .elevator      // 엘리베이터
+
+        // 횡단보도 (방향 구분)
+        case 211: return .crosswalk
+        case 212: return .crosswalkLeft
+        case 213: return .crosswalkRight
+        case 214: return .crosswalk8
+        case 215: return .crosswalk10
+        case 216: return .crosswalk2
+        case 217: return .crosswalk4
+
+        // 시종점·경유지
         case 200: return .start
         case 201: return .arrive
-        case 211...217: return .crosswalk
+        case 184...189: return .waypoint
+
+        // 공식표의 1~7은 "안내 없음"이다. `Point` feature로 실제 오는지 확인되지
+        // 않아 매핑하지 않는다 — 주황 배지로 뜨면 놓친 회전이 아니라 이 대역일 수 있다.
         default: return .unknown
         }
     }

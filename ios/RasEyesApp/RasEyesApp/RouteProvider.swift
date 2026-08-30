@@ -14,7 +14,13 @@ import Foundation
 /// 앱에서 이 공통 코드로 정규화한 뒤 Pi에 넘긴다. Pi의 TTS는 영어 모델
 /// (`en_US-lessac-medium`)이므로 제공자의 한국어 원문을 그대로 보내지 않는다.
 /// 문장 조립은 Pi 쪽 Phase 3의 책임이다.
+///
+/// rawValue는 BLE로 나가는 실제 바이트다. 서로 접두어가 겹쳐도 무방하지만
+/// (`|` 구분자가 있으므로) **중복은 안 된다** — Swift가 컴파일 에러로 잡아준다.
 enum ManeuverCode: String {
+
+    // MARK: 회전
+
     case start = "S"
     case straight = "F"
     case left = "L"
@@ -24,12 +30,33 @@ enum ManeuverCode: String {
     case sharpLeft = "HL"
     case sharpRight = "HR"
     case uTurn = "U"
+
+    // MARK: 횡단보도
+
+    /// 횡단보도는 방향까지 구분한다. 시각장애인에게 "왼쪽 횡단보도"와 "오른쪽
+    /// 횡단보도"는 안전에 직결되는 정보이므로 하나로 뭉개지 않는다.
+    /// TMAP은 이를 211~217로 세분해 준다.
     case crosswalk = "X"
+    case crosswalkLeft = "XL"
+    case crosswalkRight = "XR"
+    case crosswalk8 = "X8"
+    case crosswalk10 = "X10"
+    case crosswalk2 = "X2"
+    case crosswalk4 = "X4"
+
+    // MARK: 시설물
+
     case overpass = "OP"
     case underpass = "UP"
     case stairs = "ST"
-    case escalator = "ES"
+    case ramp = "RP"
+    case stairsAndRamp = "SP"
     case elevator = "EV"
+
+    // MARK: 기타
+
+    /// 경유지 통과. 현재 앱은 경유지를 넣지 않으므로 실제로는 오지 않는다.
+    case waypoint = "W"
     case arrive = "A"
     case unknown = "?"
 }

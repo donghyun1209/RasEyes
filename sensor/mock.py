@@ -83,3 +83,24 @@ class MockToFSensor(BaseToFHAL):
     def stop(self) -> None:
         """ToF 센서를 정지 상태로 전환한다."""
         self._running = False
+
+from sensor.interface import BaseNavHAL
+from typing import Optional
+
+class MockNavSensor(BaseNavHAL):
+    """테스트용 Mock Nav 센서."""
+
+    def __init__(self) -> None:
+        self._running: bool = False
+
+    def start(self) -> None:
+        self._running = True
+
+    def get_latest_instruction(self) -> Optional[str]:
+        if not self._running:
+            raise RuntimeError("Nav sensor not started. Call start() first.")
+        # PC 환경에서는 네비게이션 지시를 받지 않는다고 가정
+        return None
+
+    def stop(self) -> None:
+        self._running = False

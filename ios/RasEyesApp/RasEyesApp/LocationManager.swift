@@ -31,11 +31,13 @@ final class LocationManager: NSObject, ObservableObject {
         // 보행 안내 정확도. 배터리 소모가 크므로 Phase 4 실측 후 조정한다.
         manager.desiredAccuracy = kCLLocationAccuracyBestForNavigation
         manager.distanceFilter = 5
+        manager.allowsBackgroundLocationUpdates = true
+        manager.showsBackgroundLocationIndicator = true
     }
 
-    /// 사용 중 위치 권한을 요청한다.
+    /// 위치 권한을 요청한다. (항상)
     func requestPermission() {
-        manager.requestWhenInUseAuthorization()
+        manager.requestAlwaysAuthorization()
     }
 
     /// 위치 추적을 시작한다. 권한이 없으면 아무 일도 하지 않는다.

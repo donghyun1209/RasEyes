@@ -43,7 +43,7 @@ from fusion.scan import (
 )
 from logs.clip_recorder import ClipRecorder
 from logs.logger import CsvLogger
-from sensor.interface import BaseToFHAL
+from sensor.interface import BaseNavHAL, BaseToFHAL
 from sensor.mock import MockToFSensor
 from sensor.power_button_handler import PowerButtonHandler
 from vision.yolo_detector_hal import YoloDetector
@@ -110,6 +110,19 @@ def _build_sensor(use_mock: bool, use_hw: bool) -> BaseToFHAL:
     except (ImportError, RuntimeError) as exc:
         logger.warning("VL53L1XHAL 초기화 실패, MockToFSensor fallback: %s", exc)
         return MockToFSensor(distance_cm=200.0)
+
+
+def _build_nav_sensor(use_mock: bool, use_hw: bool) -> BaseNavHAL:
+    """환경에 맞는 네비게이션 BLE 센서 컴포넌트를 생성한다."""
+    from sensor.mock import MockNavSensor
+    if use_mock or not use_hw:
+        return MockNavSensor()
+    try:
+        from sensor.ble_nav_hal import BleNavHAL
+        return BleNavHAL()
+    except (ImportError, RuntimeError) as exc:
+        logger.warning("BleNavHAL 초기화 실패, MockNavSensor fallback: %s", exc)
+        return MockNavSensor()
 
 
 def _build_audio(use_mock: bool, use_hw: bool) -> BaseAudioHAL:
@@ -525,6 +538,7 @@ class RasEyesApp:
         self._use_hw = use_hw
         self._vision: VisionInterface = _build_vision(use_mock, use_hw)
         self._sensor: BaseToFHAL = _build_sensor(use_mock, use_hw)
+        self._nav_sensor: BaseNavHAL = _build_nav_sensor(use_mock, use_hw)
         self._fusion = FusionEngine()
         self._alert_policy = AlertPolicy()
         self._audio: BaseAudioHAL = _build_audio(use_mock, use_hw)
@@ -572,6 +586,7 @@ class RasEyesApp:
         self._vision.start()
         time.sleep(stagger)
         self._sensor.start()
+        self._nav_sensor.start()
         time.sleep(stagger)
         self._audio.start()
         self._csv_logger.open()
@@ -716,6 +731,7 @@ class RasEyesApp:
             self._s_thread.join(timeout=2.0)
         self._vision.stop()
         self._sensor.stop()
+        self._nav_sensor.stop()
         self._audio.stop()
         self._tts.stop()
         self._csv_logger.close()
@@ -1086,6 +1102,11 @@ class RasEyesApp:
                     self._audio.play_occlusion_alert()
                     _last_occlusion_alert_time = now
                     _occlusion_alert_count += 1
+
+            # Phase 2: 도보 경로(BLE) 지시 수신 확인 (TTS 발화는 Phase 3)
+            nav_instruction = self._nav_sensor.get_latest_instruction()
+            if nav_instruction is not None:
+                logger.info(f"Nav Instruction Received: {nav_instruction}")
 
             # v2.0 3: 경고 이벤트 클립 — 링 버퍼 적재 및 HIGH 트리거
             # E2E 레이턴시 측정 이후에 두어 JPEG 인코딩 시간이 레이턴시 EMA에 섞이지 않게 한다.

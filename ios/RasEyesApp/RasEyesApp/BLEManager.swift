@@ -45,9 +45,18 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
 
     // MARK: - CBCentralManagerDelegate
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
-        if central.state == .poweredOn {
+        switch central.state {
+        case .poweredOn:
+            print("BLE: 전원 켜짐, 스캔 시작")
             startScanning()
-        } else {
+        case .unauthorized:
+            print("BLE: 권한 없음 (Info.plist 확인 필요)")
+            isConnected = false
+        case .poweredOff:
+            print("BLE: 블루투스 꺼져 있음")
+            isConnected = false
+        default:
+            print("BLE: 기타 상태 (\(central.state.rawValue))")
             isConnected = false
         }
     }

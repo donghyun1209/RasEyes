@@ -1,8 +1,8 @@
 # RasEyesNav — iOS 길안내 앱 (2.2 로드맵 Phase 1)
 
 폰에서 목적지를 검색해 도보 턴바이턴 경로를 뽑고, 이후 Phase 2에서 그 지시를
-Pi로 전송한다. **Xcode 프로젝트는 이미 생성되어 커밋되어 있다** — 맥에서는 아래
-"남은 할 일"만 하면 빌드된다.
+Pi로 전송한다. **✅ Phase 1은 2026-08-30 맥에서 빌드·시뮬레이터 검증까지 완료했다**
+(iPhone 17 / iOS 26.5 · 완료 판정 4단계 전부 통과 · 경로 스텝 배지 전부 정상 매핑, 미매핑 turnType 0개).
 
 ## 왜 MapKit + TMAP 조합인가
 
@@ -48,9 +48,9 @@ ios/
   같은 `enum Secrets`를 선언하므로 `Invalid redeclaration of 'Secrets'`로 빌드가
   깨진다. 그래서 템플릿만 한 단계 위에 둔다 (2026-08-28에 이 상태였던 것을 고쳤다).
 
-## 맥에서 남은 할 일
+## 맥 빌드·검증 (✅ 완료 — 2026-08-30)
 
-> 맥의 클로드에 그대로 붙여넣을 프롬프트가 `MAC_PROMPT.md`에 있다.
+> 맥의 클로드에 그대로 붙여넣을 프롬프트가 `MAC_PROMPT.md`에 있다. 아래는 실제로 밟은 절차다.
 
 ### 1. TMAP 앱 키 발급 (결제 수단 등록 불필요)
 
@@ -66,6 +66,8 @@ ios/
 
 아래 "동작 확인" 절차대로 실행해 경로 목록까지 뜨는지 본다. 이게 Phase 1 완료 판정이다.
 
+**결과 (2026-08-30):** `xcodebuild -scheme RasEyesApp -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 17' build` → `BUILD SUCCEEDED`. 완료 판정 4단계 전부 통과 — 서울시청→서울역 경로 **2,133m·약 27분**, 스텝 14개 배지 전부 정상 매핑(**미매핑 turnType 0개**). 맥 첫 빌드에서 컴파일 blocker 2건이 드러나 고쳤다(아래 참고). 시뮬레이터엔 `iPhone 16`이 없어 `iPhone 17`로 진행했다.
+
 ### 참고: PC에서 이미 처리한 것 (2026-08-30)
 
 맥에서 할 필요가 없다. 되돌리지 말 것.
@@ -78,6 +80,18 @@ ios/
   `RasEyesApp/RasEyesApp-Bridging-Header.h`를 가리키고 있었는데 **그 파일이 없어서 빌드가
   즉시 실패하는 상태였다.** Objective-C 코드가 없는 Swift 전용 프로젝트라 설정 자체를 지웠다.
   빈 헤더를 만들어 되살리지 말 것.
+
+### 참고: 맥 첫 빌드에서 추가로 고친 것 (2026-08-30)
+
+리눅스엔 Swift 컴파일러가 없어 못 잡던 컴파일 blocker 2건이 맥 첫 빌드에서 드러났다.
+
+* **`LocationManager.swift` — `import Combine` 추가.** `@Published`/`ObservableObject`가
+  Combine 소속인데 `SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES`라 최신 컴파일러가
+  암묵적(transitive) import를 막아 `does not conform to protocol 'ObservableObject'` 에러가 났다.
+* **`TmapRouteProvider.swift` — `maneuver(forTurnType:)`에 `guard let turnType else { return .unknown }` 추가.**
+  `switch`에 옵셔널 `Int?`를 그대로 넣으면 개별 정수 리터럴(`case 12:`)은 매치되지만 범위 패턴
+  `case 184...189`는 `ClosedRange`라 `Int?`에 매치되지 않아 컴파일 에러였다. nil은 그대로
+  `.unknown`으로 떨어지므로 동작은 이전과 동일하다.
 
 ### 참고: 손대지 않아도 되는 것
 
@@ -104,7 +118,7 @@ ios/
 |---|---|
 | 앱 실행 | 위치 권한 팝업 → 허용 |
 | 지도 | 파란 점(현재 위치)이 서울에 찍힘 |
-| 검색 | "덕수궁" 입력 후 엔터 → 결과 목록 |
+| 검색 | 목적지 입력 후 엔터 → 결과 목록 (⚠ 시뮬레이터는 한글 검색 불가 → 영문으로) |
 | 결과 선택 | 경로 지시 목록 + 총 거리·시간 |
 
 경로 목록의 각 행 앞에 `R|50` 같은 **파란 코드 배지**가 붙는다. 이게 Phase 2에서
@@ -116,6 +130,11 @@ Pi로 실제 전송할 문자열이다. 배지가 **주황색(`?|…`)이면 매
   (아래 부록). 그 과정에서 오류 세 건이 나왔다 — `128`은 에스컬레이터가 아니라 **경사로**,
   엘리베이터로 적어 두었던 `130`은 **표에 없는 코드**, 실제 엘리베이터 `218`은 **누락**이었다.
   표에 없는 코드는 여전히 `.unknown`(주황 배지)으로 떨어뜨려 실측으로 걸러낸다.
+* **iOS 시뮬레이터에서 한글 목적지 검색이 안 된다.** `MKLocalSearch`가 한글 쿼리("덕수궁")를
+  `MKErrorDomain error 4`로 실패시킨다 — 영문("Seoul Station")·Apple 기본 지도 앱은 정상이라
+  **앱 코드가 아니라 시뮬레이터 제약**이다. 실기기에서는 한글도 정상 동작하므로 Phase 4에서
+  재확인한다. (TMAP 경로는 선택된 **좌표**로 조회되므로 검색 쿼리 언어와 무관하다 —
+  2026-08-30 맥 검증은 영문으로 목적지를 골라 경로까지 확인했다.)
 * 지도에 경로선(폴리라인)을 그리지 않는다. `LineString` 좌표를 버리고 있으므로
   필요해지면 `TmapResponse.Geometry`에서 살린다.
 * 백그라운드 위치 추적(로드맵 Phase 2-4)은 아직 붙이지 않았다.

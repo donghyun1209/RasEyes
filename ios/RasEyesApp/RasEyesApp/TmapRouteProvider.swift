@@ -128,6 +128,7 @@ struct TmapRouteProvider: RouteProvider {
     /// 표에 없는 코드는 계속 `.unknown`으로 떨어뜨리고 원문(`rawDescription`)을 화면에
     /// 남긴다. 모르는 코드를 임의로 "직진"에 몰아넣으면 회전을 놓치고도 조용히 지나간다.
     private static func maneuver(forTurnType turnType: Int?) -> ManeuverCode {
+        guard let turnType else { return .unknown }
         switch turnType {
         // 회전
         case 11, 233: return .straight  // 233 = 직진 임시

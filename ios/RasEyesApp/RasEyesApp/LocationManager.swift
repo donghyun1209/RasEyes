@@ -5,6 +5,7 @@
 //  CoreLocation 래퍼.
 //
 
+import Combine
 import CoreLocation
 import Foundation
 

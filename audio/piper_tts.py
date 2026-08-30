@@ -88,6 +88,8 @@ class PiperTts(BaseTtsHAL):
         self._stop_flag = threading.Event()
         self._last_high_time: float = 0.0
         self._last_mid_time: float = 0.0
+        # 진행 중인 발화의 위험 수준 — 새 경보가 선점할지 판단하는 근거.
+        self._current_risk: Optional[RiskLevel] = None
         self._pcm_cache: "OrderedDict[str, bytes]" = OrderedDict()
         self._prerendered_cache = load_prerendered_cache(self._voice.config.sample_rate)
         self._stream = ResidentAudioStream(self._voice.config.sample_rate, device=device_idx)
@@ -99,7 +101,8 @@ class PiperTts(BaseTtsHAL):
         Args:
             text: 발화할 문자열.
             risk_level: HIGH면 진행 중 발화를 교체하고 즉시 발화.
-                        MID면 발화 중이면 skip.
+                        MID면 발화 중이면 skip하되, 진행 중인 것이 길안내(NAV)면
+                        선점한다. NAV는 무엇이든 발화 중이면 skip.
         """
         now = time.monotonic()
         if risk_level == RiskLevel.HIGH:
@@ -107,14 +110,25 @@ class PiperTts(BaseTtsHAL):
                 return
             self._kill_current()
             self._last_high_time = now
-            self._start_thread(text)
+            self._start_thread(text, risk_level)
         elif risk_level == RiskLevel.MID:
             if now - self._last_mid_time < config.TTS_MID_COOLDOWN_SEC:
                 return
             if self._thread is not None and self._thread.is_alive():
-                return
+                # 진행 중인 발화가 길안내면 선점한다 — 장애물 경보가 **항상**
+                # 턴바이턴 안내를 이긴다 (2.2 로드맵 Phase 3-2). 이 분기가 없으면
+                # 길안내 합성 중에 들어온 MID 쪽이 대신 버려지는데, AlertPolicy는
+                # 엣지 트리거고 ALERT_REMINDER_SEC이 inf(재알림 꺼짐)라 그 경보는
+                # 래치가 풀려 재진입할 때까지 다시 나오지 않는다 — 통째로 유실된다.
+                if self._current_risk is not RiskLevel.NAV:
+                    return
+                self._kill_current()
             self._last_mid_time = now
-            self._start_thread(text)
+            self._start_thread(text, risk_level)
+        elif risk_level == RiskLevel.NAV:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._start_thread(text, risk_level)
 
     def stop(self) -> None:
         """진행 중인 발화를 중단하고 리소스를 해제한다."""
@@ -143,8 +157,9 @@ class PiperTts(BaseTtsHAL):
         self._stream.clear()
         self._stop_flag = threading.Event()
         self._thread = None
+        self._current_risk = None
 
-    def _start_thread(self, text: str) -> None:
+    def _start_thread(self, text: str, risk_level: RiskLevel) -> None:
         """발화 스레드를 새로 생성하고 시작한다.
 
         stop_flag를 인자로 캡처하여 _kill_current()가 Event를 교체해도
@@ -152,7 +167,10 @@ class PiperTts(BaseTtsHAL):
 
         Args:
             text: 발화할 문자열.
+            risk_level: 이 발화의 위험 수준. 뒤이어 들어온 경보가 선점 여부를
+                판단하는 근거이므로 반드시 기록한다.
         """
+        self._current_risk = risk_level
         stop_flag = self._stop_flag  # 현재 Event 캡처 — 교체 후에도 유효
         self._thread = threading.Thread(
             target=self._speak_worker,

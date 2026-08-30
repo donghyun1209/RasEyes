@@ -77,11 +77,23 @@ struct RouteStep: Identifiable {
     /// 지시가 발생하는 지점. 경로 이탈 재계산(파리 도착 후 과제)에 쓴다.
     let coordinate: CLLocationCoordinate2D?
 
-    /// Phase 2에서 Pi로 보낼 압축 형식 (예: `R|50`).
+    /// Pi로 보낼 압축 형식 (예: `R|50`). 목록 표시와 수동 전송에 쓴다.
     ///
-    /// BLE로 확정될 경우 iOS 기본 MTU(20바이트)를 넘지 않도록 짧게 유지한다.
+    /// iOS 기본 MTU(20바이트)를 넘지 않도록 짧게 유지한다.
     var wireFormat: String {
-        "\(maneuver.rawValue)|\(distanceMeters)"
+        wireCode(distanceMeters: distanceMeters)
+    }
+
+    /// 남은 거리를 다시 재서 만든 압축 코드.
+    ///
+    /// `distanceMeters`는 **직전 구간의 길이**라, 걸어가면서 예고할 때 그대로
+    /// 쓰면 실제 남은 거리와 어긋난다. `NavigationSession`이 현재 위치에서
+    /// 다시 잰 값을 넣어 호출한다.
+    ///
+    /// - Parameter meters: 지시 지점까지 남은 거리(m).
+    /// - Returns: `<동작>|<거리>` 형식의 코드.
+    func wireCode(distanceMeters meters: Int) -> String {
+        "\(maneuver.rawValue)|\(meters)"
     }
 }
 

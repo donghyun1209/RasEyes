@@ -5,6 +5,7 @@
 //  지도 · 목적지 검색 · 경로 지시 목록.
 //
 
+import Combine
 import MapKit
 import SwiftUI
 
@@ -25,6 +26,7 @@ struct ContentView: View {
     @State private var isLoading = false
 
     @StateObject private var ble = BLEManager()
+    @StateObject private var session = NavigationSession()
 
     /// 지금은 한국 전용 제공자 하나만 쓴다.
     /// 파리 출국 전에 좌표로 제공자를 고르는 분기를 추가한다.
@@ -40,6 +42,14 @@ struct ContentView: View {
         .task {
             location.requestPermission()
             location.start()
+        }
+        .onReceive(location.$coordinate) { coordinate in
+            // ⚠ onChange(of:)로는 안 된다 — CLLocationCoordinate2D는 Equatable이
+            // 아니라 컴파일이 실패한다. Published 퍼블리셔를 직접 구독한다.
+            guard let coordinate else { return }
+            if let code = session.update(location: coordinate) {
+                ble.sendCode(code)
+            }
         }
         .alert("오류", isPresented: .constant(errorMessage != nil)) {
             Button("확인") { errorMessage = nil }
@@ -127,6 +137,7 @@ struct ContentView: View {
                     .font(.subheadline.bold())
                 Spacer()
                 Button("초기화") {
+                    session.stop()
                     self.route = nil
                     destination = nil
                     query = ""
@@ -136,23 +147,44 @@ struct ContentView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
 
-            // BLE 전송 테스트 버튼 (Spike용)
-            HStack {
-                Circle()
-                    .fill(ble.isConnected ? Color.green : Color.red)
-                    .frame(width: 10, height: 10)
-                Text(ble.isConnected ? "BLE 연결됨" : "BLE 대기 중")
-                    .font(.caption)
-                
-                Spacer()
-                
-                Button("첫 단계 전송 테스트") {
-                    if let firstStep = route.steps.first {
-                        ble.sendCode(firstStep.wireFormat)
+            // BLE 상태 · 안내 제어
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Circle()
+                        .fill(ble.isConnected ? Color.green : Color.red)
+                        .frame(width: 10, height: 10)
+                    Text(ble.isConnected ? "BLE 연결됨" : "BLE 대기 중")
+                        .font(.caption)
+
+                    Spacer()
+
+                    // 걷지 않고 확인하는 수단 — 디버깅용으로 남겨둔다.
+                    Button("첫 단계 전송") {
+                        if let firstStep = route.steps.first {
+                            ble.sendCode(firstStep.wireFormat)
+                        }
                     }
+                    .font(.caption)
+                    .buttonStyle(.bordered)
+                    .disabled(!ble.isConnected)
+
+                    Button(session.isRunning ? "안내 중지" : "안내 시작") {
+                        if session.isRunning {
+                            session.stop()
+                        } else {
+                            session.start(route: route)
+                        }
+                    }
+                    .font(.caption)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!ble.isConnected)
                 }
-                .disabled(!ble.isConnected)
-                .buttonStyle(.borderedProminent)
+
+                if session.isRunning {
+                    Text(progressText)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
             }
             .padding(.horizontal, 12)
             .padding(.bottom, 8)
@@ -192,6 +224,16 @@ struct ContentView: View {
         .font(.footnote)
         .foregroundStyle(.secondary)
         .frame(height: 100)
+    }
+
+    /// 안내 진행 상황 한 줄 요약.
+    private var progressText: String {
+        let position = min(session.currentIndex + 1, max(session.totalSteps, 1))
+        var text = "안내 중 · 지시 \(position)/\(session.totalSteps)"
+        if let code = session.lastSentCode {
+            text += " · 최근 전송 \(code)"
+        }
+        return text
     }
 
     // MARK: - 동작

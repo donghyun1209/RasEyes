@@ -41,6 +41,7 @@ from fusion.scan import (
     is_wall_reading,
     try_pair_capture,
 )
+from fusion.nav_parser import parse_nav_instruction
 from logs.clip_recorder import ClipRecorder
 from logs.logger import CsvLogger
 from sensor.interface import BaseNavHAL, BaseToFHAL
@@ -396,6 +397,60 @@ def _scan_should_finalize(now: float, scan_start_ts: float) -> bool:
         경과 시간이 SCAN_MAX_DURATION_SEC 이상이면 True.
     """
     return now - scan_start_ts >= config.SCAN_MAX_DURATION_SEC
+
+
+def _decide_nav_speech(
+    pending: Optional[str],
+    playing: Optional[str],
+    obstacle_alert_risk: Optional[RiskLevel],
+    tts_speaking: bool,
+    scan_active: bool,
+) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """길안내(턴바이턴) 발화를 이번 사이클에 내보낼지 판단한다.
+
+    2.2 로드맵 Phase 3-2/3-3을 그대로 옮긴 순수 함수다. 예전에는 이 판단이
+    메인 루프 세 군데에 지역 변수로 흩어져 있어 테스트가 불가능했고, 그래서
+    "MID 경보가 길안내에 밀린다"는 결함이 완료 표시가 붙은 뒤에야 발견됐다.
+    `_should_low_power`·`_should_fps_fallback`과 같은 형태로 분리한다.
+
+    규칙:
+      1. **선점당하면 큐로 되돌린다.** 장애물 경보가 실제로 발화됐거나 둘러보기가
+         켜졌으면 재생 중이던 길안내는 유실 대상이다 — pending으로 되돌려 뒤에
+         다시 읽는다. ⚠ 단 **pending에 더 새 지시가 이미 있으면 그쪽을 남긴다**.
+         무조건 덮으면 로드맵 3항("오래된 지시는 비우고 최신으로 덮어쓰기")을
+         정확히 반대로 어긴다.
+      2. **끝났으면 표식을 지운다.** TTS가 유휴면 재생이 완료된 것이다.
+      3. **조용할 때만 내보낸다.** 장애물 경보·둘러보기·진행 중 발화가 모두
+         없을 때만 최신 지시 하나를 발화한다.
+
+    Args:
+        pending: 아직 발화하지 못한 최신 지시 코드. 없으면 None.
+        playing: 지금 발화 중인 지시 코드. 없으면 None.
+        obstacle_alert_risk: 이번 사이클에 **실제로 발화된** 장애물 경보의 위험
+            수준. 없으면 None. HIGH/MID를 가리지 않는다 — 로드맵은 장애물 경보가
+            "항상" 길안내를 덮어쓴다고 못박았다.
+        tts_speaking: TTS가 합성/재생 중인지 여부.
+        scan_active: 둘러보기(360° 스캔) 진행 중인지 여부.
+
+    Returns:
+        (새 pending, 새 playing, 이번 사이클에 발화할 코드 또는 None).
+    """
+    if playing is not None and (obstacle_alert_risk is not None or scan_active):
+        if pending is None:
+            pending = playing
+        playing = None
+    elif playing is not None and not tts_speaking:
+        playing = None
+
+    if (
+        pending is not None
+        and not tts_speaking
+        and not scan_active
+        and obstacle_alert_risk is None
+    ):
+        return None, pending, pending
+
+    return pending, playing, None
 
 
 def _put_latest(q: "queue.Queue", item: object) -> None:
@@ -827,6 +882,9 @@ class RasEyesApp:
         _no_detect_cycles: int = 0
         _mid_suppressed: int = 0
         _total_cycles: int = 0
+        
+        _pending_nav_instruction: Optional[str] = None
+        _playing_nav_instruction: Optional[str] = None
 
         while not self._stop_event.is_set():
             loop_start = time.monotonic()
@@ -1075,9 +1133,35 @@ class RasEyesApp:
 
             # TTS: 탐지 결과 기반 음성 알림 (비프음과 독립적으로 논블로킹 동작)
             tts_phrase = _build_tts_text(result)
+            _obstacle_alert_risk: Optional[RiskLevel] = None
             if obstacle_alert_allowed and tts_phrase:
                 self._tts.speak(tts_phrase, result.risk_level)
                 _last_tts_text = tts_phrase
+                _obstacle_alert_risk = result.risk_level
+
+            # v2.2 Phase 3: 도보 경로(BLE) 지시 수신 → 길안내 발화 중재.
+            # 수신을 중재 **직전**에 두어 새 지시가 같은 사이클에 반영되게 한다.
+            nav_instruction = self._nav_sensor.get_latest_instruction()
+            if nav_instruction is not None:
+                logger.info("Nav Instruction Received: %s", nav_instruction)
+                _pending_nav_instruction = nav_instruction
+
+            # ⚠ is_speaking()을 여기서 새로 읽는다. 위쪽 tts_speaking은 장애물
+            # 발화 **이전** 값이라, 재사용하면 TTS가 바쁜데 유휴로 오판해
+            # speak(NAV)가 no-op으로 삼켜지고 지시가 조용히 사라진다.
+            (
+                _pending_nav_instruction,
+                _playing_nav_instruction,
+                _nav_to_speak,
+            ) = _decide_nav_speech(
+                _pending_nav_instruction,
+                _playing_nav_instruction,
+                _obstacle_alert_risk,
+                self._tts.is_speaking(),
+                self._scan_active,
+            )
+            if _nav_to_speak is not None:
+                self._tts.speak(parse_nav_instruction(_nav_to_speak), RiskLevel.NAV)
 
             # 5-1: E2E 레이턴시 측정 (퓨전+오디오 결정 완료 시점, 신규 프레임 수신 시에만 갱신)
             if current_vision_ts is not None:
@@ -1102,11 +1186,6 @@ class RasEyesApp:
                     self._audio.play_occlusion_alert()
                     _last_occlusion_alert_time = now
                     _occlusion_alert_count += 1
-
-            # Phase 2: 도보 경로(BLE) 지시 수신 확인 (TTS 발화는 Phase 3)
-            nav_instruction = self._nav_sensor.get_latest_instruction()
-            if nav_instruction is not None:
-                logger.info(f"Nav Instruction Received: {nav_instruction}")
 
             # v2.0 3: 경고 이벤트 클립 — 링 버퍼 적재 및 HIGH 트리거
             # E2E 레이턴시 측정 이후에 두어 JPEG 인코딩 시간이 레이턴시 EMA에 섞이지 않게 한다.

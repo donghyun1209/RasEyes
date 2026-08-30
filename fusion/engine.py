@@ -14,6 +14,7 @@ class RiskLevel(Enum):
     NONE = auto()
     MID = auto()
     HIGH = auto()
+    NAV = auto()
 
 
 @dataclass

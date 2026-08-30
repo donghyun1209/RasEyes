@@ -54,7 +54,7 @@ RasEyes/
 │   ├── interface.py            # BaseToFHAL 추상 클래스
 │   ├── vl53l1x_hal.py          # VL53L1XHAL — 실제 ToF 센서 (I2C)
 │   ├── filters.py              # MovingAverageFilter (window=3)
-│   ├── button_handler.py       # ButtonHandler — 물리 버튼(음소거 토글) GPIO 입력
+│   ├── power_button_handler.py # PowerButtonHandler — 전원 버튼(둘러보기 모드) evdev 입력
 │   └── mock.py                 # MockToFSensor — 고정값·시퀀스 지원
 ├── fusion/
 │   └── engine.py                # FusionEngine (퓨전 로직 + reset_filter)

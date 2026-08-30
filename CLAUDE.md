@@ -116,6 +116,7 @@
 * Pi(`ssh raseyes`)는 **git이 아니라 rsync로 배포**한다. Pi의 git 이력은 실제 배포 상태와 무관하게 뒤처져 있으므로 `git pull`은 사용하지 않는다.
 * 배포 시 제외: `.git/`, `.venv/`, `models/`(대용량 바이너리, Pi에 이미 존재), `logs/*.csv`(운영 로그), `logs/events/`(경고 이벤트 클립), `*.md`(Pi에서 별도로 편집된 작업 노트가 있어 덮어쓰면 유실됨), `logs_archive/`(PC 전용 수집 아카이브), `.deploy_backup/`(Pi의 이전 배포 백업 — 롤백 수단), `__pycache__/`(PC는 Python 3.13, Pi는 3.10이라 pyc가 서로 무효), `.pytest_cache/`, `ios/`(iOS 앱 소스 — Pi에서 쓰지 않는다). 배포 전 `rsync -n`(dry-run)으로 변경/삭제 목록을 반드시 확인.
 * ⚠️ **`logs/events/` 제외를 빠뜨리면 안 된다.** `logs/*.csv` 패턴은 하위 **디렉터리**를 걸러내지 못하므로, PC에 없는 `logs/events/`가 `rsync --delete`의 삭제 대상이 되어 **Pi에 쌓인 이벤트 클립이 배포 한 번에 전멸한다** (Phase 3 자체가 무의미해짐).
+* **OS 패키지 의존성:** Pi 초기 세팅 시 `sudo apt install espeak-ng espeak-ng-data-ko` (TTS fallback) 설치가 필수다. *(참고: 하드웨어 버튼 제거로 `libgpiod` 패키지는 더 이상 설치하지 않음)*
 * `raseyes.service`는 `.venv`가 아니라 `/usr/bin/python3`로 직접 실행된다 — 의존성은 시스템 전역 `pip3`에 설치되어 있어야 한다.
 * `sudo systemctl restart/status raseyes.service`는 대화형 비밀번호가 필요해 Claude가 직접 실행할 수 없다 (보안 정책상 커맨드에 평문 비밀번호를 넣는 것은 자동 차단됨) — 사용자가 `! ssh -t raseyes "sudo systemctl restart raseyes.service"` 형태로 직접 실행해야 한다. `journalctl -u raseyes.service`는 sudo 없이 조회 가능.
 * **원격 `sudo`에는 반드시 `ssh -t`를 쓴다.** `-t`가 없으면 TTY가 없어 sudo가 비밀번호 프롬프트를 띄우지 못하고 그대로 멈추거나 `sudo: a terminal is required to read the password`로 실패한다 — 접속 장애로 오인하기 쉽다.
@@ -149,3 +150,8 @@
 * 비용은 정상 상태 LUT 적용뿐이다 (PC 실측 중앙값 0.28ms — 프레임 예산 66ms의 0.43%). 게인 재계산은 `CSI_AWB_UPDATE_INTERVAL_SEC` 주기에만 1.0ms.
 * 수집된 클립에 이 클래스를 그대로 적용해 PC에서 YOLO를 돌리면 탐지가 4건 → 6건으로 늘고, 오분류도 정정된다(`bench:0.43` → `car:0.45`). **다만 선명도가 낮은 프레임은 보정해도 0건이다** — AWB는 블러를 고치지 못한다.
 
+## 11. Scan Mode (둘러보기 모드)
+* **목적 및 트리거:** 내장 전원 버튼(`PowerButtonHandler`)을 누르면 주변 360°를 회전하며 장애물을 스캔해 요약 발화한다.
+* **저전력 모드(Low Power Mode) 차단 필수:** 스캔이 활성화되면 **반드시 저전력 모드를 차단하고 즉시 해제(15 FPS 복귀)** 해야 한다. 저전력(4 FPS) 상태가 유지되면 프레임 간격이 250ms로 늘어나 비전-ToF 페어링 캡처(`try_pair_capture`) 시 데이터 만료(Staleness > 0.5s)로 인해 물체를 통째로 누락하게 된다. (회귀 테스트: `tests/test_low_power.py::TestScanBlocksLowPower`)
+* **발화 그룹핑 및 상한:** 요약 문장은 거리순 나열이 아니라 **방향별(앞→우→뒤→좌)** 로 묶어 조립한다(`build_scan_sentence`). 한 방향에 물체가 몰려 다른 방향이 묵살되는 것을 막기 위해, 전체 상한이 아닌 **방향당 최대 3그룹**(`SCAN_MAX_ITEMS_PER_DIRECTION`)으로 제한한다. 아무것도 없는 방향은 발화를 생략한다.
+* **동률 정렬 우선순위:** 거리가 같거나 상한(OoR)으로 동일하게 처리되는 물체들은 발견 순서가 아니라 **감지 횟수(빈도)가 높은 쪽**을 우선 정렬해 발화에서 잘리지 않도록 한다.

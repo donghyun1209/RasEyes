@@ -24,6 +24,8 @@ struct ContentView: View {
     @State private var errorMessage: String?
     @State private var isLoading = false
 
+    @StateObject private var ble = BLEManager()
+
     /// 지금은 한국 전용 제공자 하나만 쓴다.
     /// 파리 출국 전에 좌표로 제공자를 고르는 분기를 추가한다.
     private let provider: RouteProvider = TmapRouteProvider(appKey: Secrets.tmapAppKey)
@@ -133,6 +135,27 @@ struct ContentView: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
+
+            // BLE 전송 테스트 버튼 (Spike용)
+            HStack {
+                Circle()
+                    .fill(ble.isConnected ? Color.green : Color.red)
+                    .frame(width: 10, height: 10)
+                Text(ble.isConnected ? "BLE 연결됨" : "BLE 대기 중")
+                    .font(.caption)
+                
+                Spacer()
+                
+                Button("첫 단계 전송 테스트") {
+                    if let firstStep = route.steps.first {
+                        ble.sendCode(firstStep.wireFormat)
+                    }
+                }
+                .disabled(!ble.isConnected)
+                .buttonStyle(.borderedProminent)
+            }
+            .padding(.horizontal, 12)
+            .padding(.bottom, 8)
 
             List(route.steps) { step in
                 HStack(alignment: .top) {

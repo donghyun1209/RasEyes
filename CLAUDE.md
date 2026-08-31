@@ -6,11 +6,11 @@
 * **Current Phase:** Orange Pi 5 배포 단계. PC(Linux, Python 3.13)에서 개발하고 OPi5로 배포(`raseyes.service`).
 * **Constraints:** 100% On-device, 외부 API/Cloud 사용 불가.
 * **KPIs:** End-to-End Latency < 500ms, 추론 < 60ms(15+ FPS), 탐지 Recall > 95%, 오탐지 < 1회/분.
-* **문서:** `docs/PRD.md`(요구사항), `docs/TRD.md`(기술 명세), `docs/1.0_ROADMAP.md`(v1.0 완료 기록), `docs/2.0_ROADMAP.md`(v2.0 기록), **`docs/2.1_ROADMAP.md`(현재 진행 중 — 마감 2026-09-02, 신규 부품 구매 없음)**, **`docs/2.2_ROADMAP.md`(2.1과 병행 — 폰 앱(iOS) BLE 길안내, 마감 2026-09-14 파리 개강 전)**, `docs/ToPost.md`(최신 작업 일지), `docs/equipment.txt`(장비 목록), `docs/wantToMake.md`(구현 아이디어 초안).
+* **문서:** `docs/PRD.md`(요구사항), `docs/TRD.md`(기술 명세), `docs/1.0_ROADMAP.md`(v1.0 완료 기록), `docs/2.0_ROADMAP.md`(v2.0 기록), **`docs/2.1_ROADMAP.md`(현재 진행 중 — 마감 2026-09-02, 신규 부품 구매 없음)**, **`docs/2.2_ROADMAP.md`(2.1과 병행 — 폰 앱(iOS) BLE 길안내, 마감 2026-09-14 파리 개강 전)**, `docs/ToPost.md`(최신 작업 일지), `docs/equipment.txt`(장비 목록), `docs/wantToMake.md`(구현 아이디어 초안), `ios/README.md`(iOS 앱 빌드·TMAP 코드표), `README.md`(저장소 대문 — 전체 구조·모드·KPI 요약).
 
 ## 2. Project Structure & Rules
 * `/vision`, `/sensor`, `/fusion`, `/audio`, `/logs`, `/scripts` 등 도메인별 폴더 분리. `main.py`는 오케스트레이션만 담당.
-* `logs/logger.py`: CSV 로깅 전담(세션마다 별도 파일). `logs/clip_recorder.py`: HIGH 경보 전후 프레임을 JPEG 시퀀스로 저장(`logs/events/`). `fusion/alert_policy.py`: 위험 '상태'를 경보 '이벤트'로 변환(엣지 트리거+히스테리시스). `vision/auto_exposure.py`: 자동 노출 제어 법칙(순수 로직 — 아래 §9). `scripts/`: RKNN 모델 변환/벤치마크·로그 수집/분석·센서 실측 유틸.
+* `logs/logger.py`: CSV 로깅 전담(세션마다 별도 파일). `logs/clip_recorder.py`: HIGH 경보 전후 프레임을 JPEG 시퀀스로 저장(`logs/events/`). `fusion/alert_policy.py`: 위험 '상태'를 경보 '이벤트'로 변환(엣지 트리거+히스테리시스). `fusion/scan.py`: 둘러보기 요약 문장 조립(§11). `fusion/nav_parser.py` + `sensor/ble_nav_hal.py`: BLE 길안내 코드 해석과 GATT 수신(§12). `vision/auto_exposure.py`: 자동 노출 제어 법칙(순수 로직 — 아래 §9). `scripts/`: RKNN 모델 변환/벤치마크·로그 수집/분석·센서 실측 유틸. `ios/`: iOS 길안내 앱(Swift) — Pi에 배포하지 않는다(§8).
 * 입력(비전, 센서)과 출력(오디오)은 반드시 추상화 계층(HAL) 인터페이스를 적용하여, 현재의 PC 모킹 클래스와 추후 Orange Pi 5 하드웨어 제어 클래스를 쉽게 교체할 수 있도록 구현.
 * 상수 및 임계값은 매직 넘버 대신 `config.py`에 분리.
 * 타입 힌트와 구글 스타일 Docstring 필수 작성. 예외 처리 철저.
@@ -121,6 +121,8 @@
 * `sudo systemctl restart/status raseyes.service`는 대화형 비밀번호가 필요해 Claude가 직접 실행할 수 없다 (보안 정책상 커맨드에 평문 비밀번호를 넣는 것은 자동 차단됨) — 사용자가 `! ssh -t raseyes "sudo systemctl restart raseyes.service"` 형태로 직접 실행해야 한다. `journalctl -u raseyes.service`는 sudo 없이 조회 가능.
 * **원격 `sudo`에는 반드시 `ssh -t`를 쓴다.** `-t`가 없으면 TTY가 없어 sudo가 비밀번호 프롬프트를 띄우지 못하고 그대로 멈추거나 `sudo: a terminal is required to read the password`로 실패한다 — 접속 장애로 오인하기 쉽다.
 * 안전 종료: `ssh -t raseyes "sudo shutdown -h now"` 실행 후 보드 LED가 꺼질 때까지 기다린 뒤 전원을 분리한다 (강제 차단 시 SD/eMMC 손상 위험).
+* ⚠️ **배포는 파일 복사로 끝나지 않는다 — rsync 뒤 재시작을 확인한다.** 2026-08-30 점검에서 Pi의 파일이 PC와 md5까지 같은데 **서비스는 구버전으로 돌고 있었다** (`fusion/__pycache__/`에 `nav_parser`가 없는 것이 증거였다 — 한 번도 import된 적이 없다는 뜻). md5 일치는 "배포됐다"의 증거일 뿐 "돌고 있다"의 증거가 아니다. 확인은 `find . -name '*.py' -newer /proc/$(pgrep -f 'python3.*main.py')`가 비어 있는지로 한다.
+* ⚠️ rsync 제외 패턴에 `.git`은 **슬래시 없이** 쓴다. `'.git/'`(디렉터리)로 쓰면 워크트리에서는 `.git`이 파일이라 걸리지 않아 Pi의 `.git/`이 `--delete` 대상이 된다. 같은 이유로 Pi에만 있는 `.claude/`·`.vscode/`·`yolov8n.pt`도 제외 목록에 넣는다.
 * Pi 계정명은 **`orangepi`** 다. `orangepi5`는 tailscale 호스트명이므로 사용자명으로 쓰면 `invalid user`로 거부된다. 새 기기(Mac 등)에서 접속하려면 그 기기의 공개키를 Pi의 `~/.ssh/authorized_keys`에 먼저 등록해야 한다 (현재 등록된 키는 리눅스 개발 PC의 `raseyes-dev` 1개뿐).
 * 카메라가 고정 거치된 채 정적인 장면을 계속 볼 때 가림 감지(`CAMERA_OCCLUSION_*`)가 오탐하는 것은 알려진 설계 한계이지 버그가 아니다. 실제 착용 시나리오(움직임 있음)에서는 덜 발생할 것으로 예상.
 
@@ -155,3 +157,13 @@
 * **저전력 모드(Low Power Mode) 차단 필수:** 스캔이 활성화되면 **반드시 저전력 모드를 차단하고 즉시 해제(15 FPS 복귀)** 해야 한다. 저전력(4 FPS) 상태가 유지되면 프레임 간격이 250ms로 늘어나 비전-ToF 페어링 캡처(`try_pair_capture`) 시 데이터 만료(Staleness > 0.5s)로 인해 물체를 통째로 누락하게 된다. (회귀 테스트: `tests/test_low_power.py::TestScanBlocksLowPower`)
 * **발화 그룹핑 및 상한:** 요약 문장은 거리순 나열이 아니라 **방향별(앞→우→뒤→좌)** 로 묶어 조립한다(`build_scan_sentence`). 한 방향에 물체가 몰려 다른 방향이 묵살되는 것을 막기 위해, 전체 상한이 아닌 **방향당 최대 3그룹**(`SCAN_MAX_ITEMS_PER_DIRECTION`)으로 제한한다. 아무것도 없는 방향은 발화를 생략한다.
 * **동률 정렬 우선순위:** 거리가 같거나 상한(OoR)으로 동일하게 처리되는 물체들은 발견 순서가 아니라 **감지 횟수(빈도)가 높은 쪽**을 우선 정렬해 발화에서 잘리지 않도록 한다.
+
+## 12. BLE 길안내 (Turn-by-Turn Navigation)
+* **구조:** iOS 앱(central) → Pi(peripheral, BlueZ D-Bus GATT 서버 `sensor/ble_nav_hal.py`). 앱은 `R|50` 형태의 **압축 코드만** 보내고 문장 조립은 `fusion/nav_parser.py`가 한다. 이유 둘 — ① BLE 기본 MTU가 20바이트라 긴 문장이 넘친다, ② Piper TTS가 영어 모델이라(§7, 의도적 선택) TMAP의 한국어 원문을 그대로 읽힐 수 없다. **Pi에 온보드 블루투스가 없어 USB 동글(Barrot BT5.3)이 필수다.**
+* ⚠️ **미지 코드에 '직진' 기본값을 두지 않는다.** `_TURN_MAPPING.get(code, 'Proceed')`처럼 쓰면 앱이 보낸 `?`(공식 코드표에 없는 turnType)가 `"Proceed in 50 meters"`로 발화되어 **회전을 놓치고도 조용히 지나간다.** 폰 쪽은 이 원칙을 지켰는데 Pi의 한 줄짜리 기본값이 무너뜨렸다 (2026-08-30 발견). 표에 없으면 `Caution, unknown instruction`으로 **거리만 알리고 판단은 사람에게 넘긴다.**
+* ⚠️ **장애물 경보는 HIGH·MID를 가리지 않고 길안내를 선점한다.** 요구는 "장애물 경보가 **항상** 덮어쓴다"인데 HIGH만 그랬다 — MID 경로가 `if _thread.is_alive(): return`으로 **자기 쪽을 스킵**했고, `ALERT_REMINDER_SEC`이 무한대(재알림 꺼짐)라 그 경보는 래치가 풀려 재진입할 때까지 **다시 나오지 않는다. 즉 통째로 유실된다.** TTS가 진행 중 발화의 위험 수준(`_current_risk`)을 기억하고, MID가 NAV를 만나면 선점하게 고쳤다 (`EspeakTts`·`PiperTts` 대칭).
+* **판단은 `main._decide_nav_speech()` 순수 함수 하나에 모은다** (`_should_low_power`·`_should_fps_fallback`과 같은 `(상태) → (상태)` 형태). 예전에는 이 판단이 메인 루프 세 군데에 지역 변수로 흩어져 있어 **테스트를 쓸 수가 없었고, 그래서 위 결함 2건이 "완료" 표시가 붙은 뒤에 발견됐다.**
+  * ⚠️ 선점당한 지시를 큐로 되돌릴 때 **pending에 더 새 지시가 있으면 그쪽을 남긴다.** 무조건 되돌리면 "오래된 지시는 비우고 최신으로 덮어쓴다" 원칙을 정확히 반대로 어긴다.
+  * 둘러보기(§11) 진행 중에는 길안내 발화를 보류한다 (`scan_active`).
+* **거리는 폰이 보내기 직전에 다시 잰다.** 경로 데이터의 `RouteStep.distanceMeters`는 '남은 거리'가 아니라 **직전 구간의 전체 길이**라, 그대로 보내면 예고 시점에 엉뚱한 숫자를 말한다 (`ios/.../NavigationSession.swift` — 60m 예고 / 15m 통과).
+* **회귀 테스트:** `tests/test_nav.py` 28건. 위 결함들이 전부 **회귀 테스트 0건 상태에서 완료 처리됐다가 뒤늦게 발견된 것**이라, 이 영역은 테스트 없이 완료로 넘기지 않는다.

@@ -1,8 +1,18 @@
-# RasEyesNav — iOS 길안내 앱 (2.2 로드맵 Phase 1)
+# RasEyesNav — iOS 길안내 앱 (2.2 로드맵)
 
-폰에서 목적지를 검색해 도보 턴바이턴 경로를 뽑고, 이후 Phase 2에서 그 지시를
-Pi로 전송한다. **✅ Phase 1은 2026-08-30 맥에서 빌드·시뮬레이터 검증까지 완료했다**
-(iPhone 17 / iOS 26.5 · 완료 판정 4단계 전부 통과 · 경로 스텝 배지 전부 정상 매핑, 미매핑 turnType 0개).
+폰에서 목적지를 검색해 도보 턴바이턴 경로를 뽑고, 그 지시를 BLE로 Pi에 전송한다.
+
+**구현 범위 (2026-08-30 기준)**
+
+| Phase | 내용 | 상태 |
+|:---:|---|---|
+| 1 | 지도·검색·경로 파싱 | ✅ 맥에서 빌드·시뮬레이터 검증 완료 (iPhone 17 / iOS 26.5 · 판정 4단계 전부 통과 · 미매핑 turnType 0개) |
+| 2 | BLE 송신 (`BLEManager.swift`) | ✅ 구현 완료 — Pi의 BlueZ GATT 서버로 write |
+| 3 | 턴바이턴 자동 진행 (`NavigationSession.swift`) | ✅ 구현 완료 — 60m 예고 / 15m 통과 |
+
+⚠️ `NavigationSession.swift`·`BLEManager.swift`는 **맥에서 `xcodebuild` 확인을 거치지
+않았다** (리눅스 개발 PC에는 Swift 컴파일러가 없다). 8/30 맥 첫 빌드에서 컴파일
+blocker 2건이 드러난 전례가 있으므로 실기 실행 전에 빌드부터 통과시킨다.
 
 ## 왜 MapKit + TMAP 조합인가
 
@@ -30,13 +40,15 @@ ios/
     ├── RasEyesApp.xcodeproj/       Xcode 프로젝트
     ├── Secrets.example.swift       ← 키 템플릿 (빌드 제외)
     └── RasEyesApp/                 ← 빌드 대상 폴더
-        ├── RasEyesNavApp.swift     앱 진입점
-        ├── ContentView.swift       지도 · 검색 · 경로 지시 목록
-        ├── LocationManager.swift   CoreLocation 권한 · 좌표
-        ├── RouteProvider.swift     제공자 프로토콜 + 정규화 모델
-        ├── TmapRouteProvider.swift TMAP GeoJSON 호출 · 파싱
+        ├── RasEyesNavApp.swift      앱 진입점
+        ├── ContentView.swift        지도 · 검색 · 경로 지시 목록
+        ├── LocationManager.swift    CoreLocation 권한 · 좌표 (백그라운드 갱신 on)
+        ├── RouteProvider.swift      제공자 프로토콜 + 정규화 모델
+        ├── TmapRouteProvider.swift  TMAP GeoJSON 호출 · 파싱
+        ├── NavigationSession.swift  턴바이턴 자동 진행 (60m 예고 / 15m 통과)
+        ├── BLEManager.swift         CoreBluetooth 스캔 · 연결 · write
         ├── Assets.xcassets/
-        └── Secrets.swift           ← 여기에 만든다 (gitignore)
+        └── Secrets.swift            ← 여기에 만든다 (gitignore)
 ```
 
 ⚠️ 이 프로젝트는 Xcode 16의 **폴더 동기화 방식**이다
@@ -137,16 +149,32 @@ Pi로 실제 전송할 문자열이다. 배지가 **주황색(`?|…`)이면 매
   2026-08-30 맥 검증은 영문으로 목적지를 골라 경로까지 확인했다.)
 * 지도에 경로선(폴리라인)을 그리지 않는다. `LineString` 좌표를 버리고 있으므로
   필요해지면 `TmapResponse.Geometry`에서 살린다.
-* 백그라운드 위치 추적(로드맵 Phase 2-4)은 아직 붙이지 않았다.
+* 백그라운드 위치 추적은 `allowsBackgroundLocationUpdates = true`로 켰으나 실기에서 화면을 끈 채 지속되는지는 확인하지 않았다.
 
-## Phase 2에서 추가할 것 (BLE 확정 — 2026-08-28)
+## Phase 2 · 3 — BLE 송신과 자동 진행 (구현 완료 — 2026-08-30)
 
-Pi에 온보드 블루투스가 없어 USB 동글을 도입하기로 했다 (Phase 0 결과, `docs/2.2_ROADMAP.md`).
-전송은 **BLE GATT**이므로 앱에 다음이 더 필요하다.
+Pi에 온보드 블루투스가 없어 USB 동글을 도입했다 (Phase 0 결과, `docs/2.2_ROADMAP.md`).
+전송은 **BLE GATT**이고, 앱이 central·Pi가 peripheral이다.
 
-* `Privacy - Bluetooth Always Usage Description` (Info)
-* Background Modes → **Uses Bluetooth LE accessories** + **Location updates**
-  (주머니에 넣고 화면을 꺼도 전송이 이어져야 한다)
+| 항목 | 값 |
+|---|---|
+| Service UUID | `12345678-1234-5678-1234-56789abcdef0` |
+| Characteristic UUID | `12345678-1234-5678-1234-56789abcdef1` |
+| 페이로드 | `R\|50` 형태의 지시 코드 (최장 8바이트 — 기본 MTU 20바이트 안) |
+
+**문장이 아니라 코드를 보내는 이유가 둘이다.** ① BLE 기본 MTU가 20바이트라 긴 문장은
+넘친다. ② Pi의 TTS가 영어 모델이라(`CLAUDE.md` §7 — 한국어 음질 문제로 의도한 선택)
+TMAP이 주는 한국어 문장을 그대로 읽힐 수 없다. 그래서 뜻만 담은 코드를 보내고
+Pi의 `fusion/nav_parser.py`가 `"Turn right in 50 meters"`로 조립한다.
+
+**자동 진행** (`NavigationSession.swift`) — 지시 지점 **60m** 안에서 한 번 예고하고,
+**15m** 안에 들면 통과로 보고 다음 지시로 넘어간다. 예고할 때 **거리를 다시 잰다**:
+`RouteStep.distanceMeters`는 남은 거리가 아니라 직전 구간의 전체 길이라, 그대로
+보내면 틀린 숫자를 말한다.
+
+**Info 설정** — `Privacy - Bluetooth Always Usage Description`, Background Modes의
+**Uses Bluetooth LE accessories** + **Location updates** (주머니에 넣고 화면을 꺼도
+전송이 이어져야 한다). `LocationManager`는 `allowsBackgroundLocationUpdates = true`다.
 
 ## Pi 배포와의 관계
 
